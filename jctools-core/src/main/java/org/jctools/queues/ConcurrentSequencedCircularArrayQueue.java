@@ -17,6 +17,13 @@ import static org.jctools.util.UnsafeLongArrayAccess.*;
 
 abstract class ConcurrentSequencedCircularArrayQueue<E> extends ConcurrentCircularArrayQueue<E>
 {
+    /**
+     * Q: 这个数组是干嘛的，和{@link #buffer}有什么区别？
+     * A:
+     * 1. 用在多生产者模式下描述{@link #buffer}每个槽位的数据是否已被填充或消费。
+     * producerIndex表示当前已分配的最大索引，而sequenceBuffer则用于描述哪些索引对应的元素已填充。
+     * 2. 尽量减少消费者和生产者读取彼此的索引，提高读性能。
+     */
     protected final long[] sequenceBuffer;
 
     public ConcurrentSequencedCircularArrayQueue(int capacity)
@@ -27,7 +34,9 @@ abstract class ConcurrentSequencedCircularArrayQueue<E> extends ConcurrentCircul
         sequenceBuffer = allocateLongArray(actualCapacity);
         for (long i = 0; i < actualCapacity; i++)
         {
+            // 细看，这里是初始化为i的，也就是说，如果producerIndex等于该槽位上的值，则应该填充
             soLongElement(sequenceBuffer, calcCircularLongElementOffset(i, mask), i);
         }
+        // sequenceBuffer是final变量，因此具有初始化保证（安全发布保证）
     }
 }

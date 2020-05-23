@@ -24,6 +24,9 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
 
 abstract class ConcurrentCircularArrayQueueL0Pad<E> extends AbstractQueue<E>
 {
+    /**
+     * 缓存行填充，保护{@code mask}{@code buffer}产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -43,15 +46,27 @@ abstract class ConcurrentCircularArrayQueueL0Pad<E> extends AbstractQueue<E>
 }
 
 /**
+ * 底层为（环形）数组的队列的公共实现。该类进行了前填充，数组的任何一侧都被填充以帮助防止伪共享。该类期望子类处理后填充。
+ *
  * Common functionality for array backed queues. The class is pre-padded and the array is padded on either side to help
  * with False Sharing prevention. It is expected that subclasses handle post padding.
  */
 abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQueueL0Pad<E>
     implements MessagePassingQueue<E>, IndexedQueue, QueueProgressIndicators, SupportsIterator
 {
+    /**
+     * 数组长度对应的掩码 - 方便用&运算代替较慢的%运算
+     * 子类需要继续缓存行填充，以避免mask 和 buffer 产生伪共享
+     */
     protected final long mask;
+    /**
+     * 真正存储元素的数组
+     */
     protected final E[] buffer;
 
+    /**
+     * @param capacity 数组的容量 - 在该实现中，会将其修正为最近的的一个2的整次幂。
+     */
     ConcurrentCircularArrayQueue(int capacity)
     {
         int actualCapacity = Pow2.roundToPowerOfTwo(capacity);
@@ -105,6 +120,8 @@ abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQu
     }
 
     /**
+     * 该迭代的存在，导致了子类在填充元素时必须使用Ordered模式，感觉并不值得。
+     *
      * Get an iterator for this queue. This method is thread safe.
      * <p>
      * The iterator provides a best-effort snapshot of the elements in the queue.
@@ -116,6 +133,7 @@ abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQu
      */
     @Override
     public Iterator<E> iterator() {
+        // 注意：在Fast Flow模式下，消费者索引是可能超过生产者索引的，不过并不影响这里的正确性
         final long cIndex = lvConsumerIndex();
         final long pIndex = lvProducerIndex();
 
@@ -159,8 +177,11 @@ abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQu
         private E getNext() {
             while (nextIndex < pIndex) {
                 long offset = calcCircularRefElementOffset(nextIndex++, mask);
+                // 这里导致了子类必须使用soRefElement发布元素，否则这里可能访问到未构造完成的对象。
+                // 极大了增加了子类实现的开销。
                 E e = lvRefElement(buffer, offset);
                 if (e != null) {
+                    // 这里未进行额外的尝试，因此语义等同于relaxedPeek，这也是类名Weak的含义之一
                     return e;
                 }
             }

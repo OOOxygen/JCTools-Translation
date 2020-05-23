@@ -15,14 +15,25 @@ package org.jctools.util;
 
 import static org.jctools.util.UnsafeAccess.UNSAFE;
 
+/**
+ * 引用类型数组的访问封装 - （各种模式）存取元素，计算索引对应的地址偏移量。
+ * - 该类中部分设计不会再重复解释，可参照{@link UnsafeLongArrayAccess}进行理解。
+ */
 @InternalAPI
 public final class UnsafeRefArrayAccess
 {
+    /**
+     * 引用类型数组首元素（相对于对象起始地址）的偏移量
+     */
     public static final long REF_ARRAY_BASE;
+    /**
+     * 每个引用类型偏移量对应的位移量 - 用于代替乘法运算
+     */
     public static final int REF_ELEMENT_SHIFT;
 
     static
     {
+        // 引用类型单个元素偏移量
         final int scale = UnsafeAccess.UNSAFE.arrayIndexScale(Object[].class);
         if (4 == scale)
         {
@@ -40,6 +51,8 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * storePlainReferenceElement - 以普通（无顺序/无内存屏障）方式将元素写入到给定数组的给定偏移量。
+     * <p>
      * A plain store (no ordering/fences) of an element to a given offset
      *
      * @param buffer this.buffer
@@ -52,6 +65,8 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * storeOrderedReferenceElement - 以Ordered方式将元素写入到给定数组的给定偏移量
+     * <p>
      * An ordered store of an element to a given offset
      *
      * @param buffer this.buffer
@@ -64,6 +79,8 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * loadPlainReferenceElement - 以普通（无序/无内存屏障）方式加载数组指定偏移量的值。
+     * <p>
      * A plain load (no ordering/fences) of an element from a given offset.
      *
      * @param buffer this.buffer
@@ -77,6 +94,8 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * loadVolatileReferenceElement - 以volatile方式加载数组指定偏移量的值。
+     * <p>
      * A volatile load of an element from a given offset.
      *
      * @param buffer this.buffer
@@ -90,6 +109,8 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * 计算普通数组的指定索引对应的偏移量 - index即为真实索引，因此简单的运算即可。
+     *
      * @param index desirable element index
      * @return the offset in bytes within the array for a given index
      */
@@ -99,6 +120,11 @@ public final class UnsafeRefArrayAccess
     }
 
     /**
+     * 计算环形数组的指定（逻辑）索引对应的偏移量 - index为逻辑索引，需要转换为真实索引。
+     * <p>
+     * 环形数组(环形缓冲区)的空间是重复利用的，因此逻辑上的index需要转换为真正的index然后再计算。
+     * 为了高效运算，假定了环形数组的长度都为2的整次幂，因此mask应该为数组长度减1，这样可以使用 '&' 快速计算。
+     *
      * Note: circular arrays are assumed a power of 2 in length and the `mask` is (length - 1).
      *
      * @param index desirable element index

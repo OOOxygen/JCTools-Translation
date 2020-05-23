@@ -22,6 +22,9 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
 
 abstract class MpmcArrayQueueL1Pad<E> extends ConcurrentSequencedCircularArrayQueue<E>
 {
+    /**
+     * 缓冲行填充 - 避免{@link #buffer} {@link #sequenceBuffer}和{@code producerIndex}产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -50,6 +53,10 @@ abstract class MpmcArrayQueueProducerIndexField<E> extends MpmcArrayQueueL1Pad<E
 {
     private final static long P_INDEX_OFFSET = fieldOffset(MpmcArrayQueueProducerIndexField.class, "producerIndex");
 
+    /**
+     * 生产者索引。
+     * 这是一个预更新值，看{@link #casProducerIndex(long, long)}就能知道。生产者们先竞争更新索引，再填充元素。
+     */
     private volatile long producerIndex;
 
     MpmcArrayQueueProducerIndexField(int capacity)
@@ -57,12 +64,19 @@ abstract class MpmcArrayQueueProducerIndexField<E> extends MpmcArrayQueueL1Pad<E
         super(capacity);
     }
 
+    /**
+     * loadVolatileProducerIndex
+     * 多生产者模型，都需要读取最新的索引
+     */
     @Override
     public final long lvProducerIndex()
     {
         return producerIndex;
     }
 
+    /**
+     * 由于是多生产者，因此生产者需要CAS原子方式更新索引。
+     */
     final boolean casProducerIndex(long expect, long newValue)
     {
         return UNSAFE.compareAndSwapLong(this, P_INDEX_OFFSET, expect, newValue);
@@ -71,6 +85,9 @@ abstract class MpmcArrayQueueProducerIndexField<E> extends MpmcArrayQueueL1Pad<E
 
 abstract class MpmcArrayQueueL2Pad<E> extends MpmcArrayQueueProducerIndexField<E>
 {
+    /**
+     * 缓存行填充 - 避免{@code consumerIndex}和{@code producerIndex}之间产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -99,6 +116,10 @@ abstract class MpmcArrayQueueConsumerIndexField<E> extends MpmcArrayQueueL2Pad<E
 {
     private final static long C_INDEX_OFFSET = fieldOffset(MpmcArrayQueueConsumerIndexField.class, "consumerIndex");
 
+    /**
+     * 消费者索引
+     * 这也是一个预更新值，看{@link #casProducerIndex(long, long)}就可以知道。消费者们先竞争更新索引，更新成功的线程可以消费该索引对应的元素。
+     */
     private volatile long consumerIndex;
 
     MpmcArrayQueueConsumerIndexField(int capacity)
@@ -106,12 +127,19 @@ abstract class MpmcArrayQueueConsumerIndexField<E> extends MpmcArrayQueueL2Pad<E
         super(capacity);
     }
 
+    /**
+     * loadVolatileConsumerIndex
+     * 因为是多消费者模型，都需要读取最新值
+     */
     @Override
     public final long lvConsumerIndex()
     {
         return consumerIndex;
     }
 
+    /**
+     * 由于是多消费者模式，因此消费者们需要CAS原子方式更新索引。
+     */
     final boolean casConsumerIndex(long expect, long newValue)
     {
         return UNSAFE.compareAndSwapLong(this, C_INDEX_OFFSET, expect, newValue);
@@ -120,6 +148,9 @@ abstract class MpmcArrayQueueConsumerIndexField<E> extends MpmcArrayQueueL2Pad<E
 
 abstract class MpmcArrayQueueL3Pad<E> extends MpmcArrayQueueConsumerIndexField<E>
 {
+    /**
+     * 缓存行填充 - 避免{@code consumerIndex}产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -144,6 +175,19 @@ abstract class MpmcArrayQueueL3Pad<E> extends MpmcArrayQueueConsumerIndexField<E
 }
 
 /**
+ * 基于{@link org.jctools.queues.ConcurrentCircularArrayQueue}的多生产者多消费者队列。
+ * 这意味着任何线程和所有线程都可以调用offer/poll/peek方法，并保持正确性。<br>
+ * 此实现遵循在包级别记录的的用于避免伪共享的模式（缓存行填充）。<br>
+ * offer/poll的算法是D.Vyukov提出的[有界多生产者多消费者队列]算法的适配。br>
+ * <p>
+ * 记住以下权衡：
+ * <ol>
+ * <li>填充避免伪共享：索引字段和两个数组的两侧都进行了填充。 我们消耗内存以避免（主动和被动的）伪共享</li>
+ * <li>2个数组，而不是一个：算法需要一个额外的long数组，该数组与elements数组的大小匹配。 这是为缓冲区分配的内存的两倍/三倍</li>
+ * <li>容量为2的幂：实际元素buffer（和sequence buffer）的容量是2的最接近的幂，大于或等于请求的容量。</li>
+ * </ol>
+ * <p>
+ *
  * A Multi-Producer-Multi-Consumer queue based on a {@link org.jctools.queues.ConcurrentCircularArrayQueue}. This
  * implies that any and all threads may call the offer/poll/peek methods and correctness is maintained. <br>
  * This implementation follows patterns documented on the package level for False Sharing protection.<br>
@@ -168,6 +212,11 @@ abstract class MpmcArrayQueueL3Pad<E> extends MpmcArrayQueueConsumerIndexField<E
 public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
 {
     public static final int MAX_LOOK_AHEAD_STEP = Integer.getInteger("jctools.mpmc.max.lookahead.step", 4096);
+    /**
+     * 来了，来了，它又来了！
+     * Q: 观望步数（不太好直译）？这是个什么东西？
+     * A: 这里是设计和{@link SpscArrayQueue}还不太一样，这里是用于减少潜在的冲突的。
+     */
     private final int lookAheadStep;
 
     public MpmcArrayQueue(final int capacity)
@@ -183,9 +232,15 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         {
             throw new NullPointerException();
         }
+        // 读取为本地变量，避免在接下来的volatile读之后重新读取
         final long mask = this.mask;
         final long capacity = mask + 1;
         final long[] sBuffer = sequenceBuffer;
+
+        // seq pIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == pIndex 表示该槽位应该被填充（此时竞争更新生产者索引）
+        // seq < pIndex  表示该槽位尚未被消费，队列已满
+        // seq > pIndex  表示该槽位已经被填充（初始为i, 填充之后 + 1）或已被消费（消费之后 + capacity）需要再下一环才能填充，此时需要重试
 
         long pIndex;
         long seqOffset;
@@ -199,22 +254,37 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             // consumer has not moved this seq forward, it's as last producer left
             if (seq < pIndex)
             {
+                // 根据seq推断该槽位尚未被消费，队列已满，由于消费者先更新的索引，后进行消费，最后更新seq，
+                // 因此需要读取最新的消费者索引查看是否有消费者正在消费该槽位，如果有则需要等待，以满足Queue对offer的语义要求。
                 // Extra check required to ensure [Queue.offer == false iff queue is full]
                 if (pIndex - capacity >= cIndex && // test against cached cIndex
                     pIndex - capacity >= (cIndex = lvConsumerIndex()))
                 { // test against latest cIndex
+                    // 读取最新的消费者索引后，发现队列确实已满
                     return false;
                 }
                 else
                 {
+                    // 队列并未真的满（消费者正在消费），此时需要重试，为了避免CAS调用，令seq大于pIndex （seq会在下一轮重新初始化，因此是安全的）
                     seq = pIndex + 1; // (+) hack to make it go around again without CAS
                 }
             }
+            // seq >= pIndex 请查看前面的大小关系注释
         }
         while (seq > pIndex || // another producer has moved the sequence(or +)
             !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
+        // Q: 为什么必须等待seq为期望值？
+        // A: 只有当seq为期望值时，可保证元素为null，且在seq上不会发生并发修改！（如果不等待seq为期望值，则在seq上可能产生并发修改）
+
+        // 注意生产者的操作时序：先CAS更新生产者索引，再发布元素，最后更新seq - 消费必须等待seq可见，否则seq上可能产生并发修改。
+        // seq是完成生产者与消费者通信的关键
+
+        // Q: 这里为什么要使用Ordered模式存储？
+        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发元素。
+
         soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
+        // 填充元素之后，将seq更新为pIndex + 1，需要保证原子存储，且存储元素不会重排序到该操作之后
         // seq++;
         soLongElement(sBuffer, seqOffset, pIndex + 1);
         return true;
@@ -233,6 +303,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
 
+        // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
+        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
+
         long cIndex;
         long seq;
         long seqOffset;
@@ -246,15 +321,18 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             expectedSeq = cIndex + 1;
             if (seq < expectedSeq)
             {
+                // 元素尚未被填充（或正在填充但seq尚不可见），此时需要读取生产者索引，是否有生产者正在填充（队列是否真的为空）
                 // slot has not been moved by producer
                 if (cIndex >= pIndex && // test against cached pIndex
                     cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
                 {
+                    // 严格地空检查，以满足Queue对poll的语义要求（当且仅当队列为空时才能返回null）
                     // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                     return null;
                 }
                 else
                 {
+                    // 队列不为空（生产者正在生产），因此需要重试，为避免CAS调用，令seq > expectedSeq（seq会在下一轮重新初始化，因此是安全的）
                     seq = expectedSeq + 1; // trip another go around
                 }
             }
@@ -262,9 +340,18 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         while (seq > expectedSeq || // another consumer beat us to it
             !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
 
+        // Q: 为什么必须等待seq为期望值？
+        // A: 只有当seq为期望值时，可保证元素可见，且在seq上不会发生并发修改！（如果不等待seq为期望值，则在seq上可能产生并发修改）
+
+        // 注意消费者的操作时序：先CAS更新consumerIndex，再删除元素，最后再更新seq - 生产者也必须等待seq可见，否则seq上可能产生并发修改。
+        // seq是完成生产者与消费者通信的关键
+
+        // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
+
         final long offset = calcCircularRefElementOffset(cIndex, mask);
         final E e = lpRefElement(buffer, offset);
         soRefElement(buffer, offset, null);
+        // 更新seq为下一环的序号，生产者在下一环的时候填充
         // i.e. seq += capacity
         soLongElement(sBuffer, seqOffset, cIndex + mask + 1);
         return e;
@@ -273,9 +360,23 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
     @Override
     public E peek()
     {
+        // 这之前的版本中，可能peek到下一环的元素，我上报之后，他们进行了修复。
+        // https://github.com/JCTools/JCTools/pull/295
+        // 我想的是校验producerIndex或sequence，但是原作者选择的是校验consumerIndex。
+        // Q：为什么不校验producerIndex？
+        // A：作者是这样解释的，seq存在的意义就是为了减少对生产者索引的读，以避免缓存行miss问题，如果校验producerIndex，则可能触发
+        // 大量的缓存行miss，因此不校验producerIndex。
+        // 但是校验consumerIndex也不算完美，因为过于严格，我们其实只需要保证它不是一个覆盖值，却变成了必须是一个稳定值。
+        // 看relaxedPeek会更容易理解该问题。
+
         // local load of field to avoid repeated loads after volatile reads
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
+
+        // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
+        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
 
         long cIndex;
         long seq;
@@ -291,16 +392,23 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             expectedSeq = cIndex + 1;
             if (seq < expectedSeq)
             {
+                // seq小于期望值，此时队列可能为空，或生产者正在填充元素，因此需要读取最新的生产者索引，以进行严格的空判断，以满足Queue对peek的语义要求
                 // slot has not been moved by producer
                 if (cIndex >= pIndex && // test against cached pIndex
                     cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
                 {
+                    // 严格地空检查，以满足Queue对peek的语义要求（当且仅当队列为空时才能返回null）
                     // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                     return null;
                 }
             }
             else if (seq == expectedSeq)
             {
+                // 解释下：由于加载lvConsumerIndex和lvRefElement这是一个组合操作，
+                // 在多消费者情况下，无法保证lvRefElement加载的element是属于这个索引的，可能读取到下一环的元素，因此需要校验。
+                // 在加载该consumerIndex对应元素之后，如果消费者索引没有发生改变，那么证明这期间没有消费者消费，那么加载的元素就是我们期望的。
+                // 时序很重要，这三个加载指令都不能重排序，因此都需要使用volatile语义，否则将无法校验（类似StampedLock的用法）
+
                 final long offset = calcCircularRefElementOffset(cIndex, mask);
                 e = lvRefElement(buffer, offset);
                 if (lvConsumerIndex() == cIndex)
@@ -320,6 +428,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long mask = this.mask;
         final long[] sBuffer = sequenceBuffer;
 
+        // seq pIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == pIndex 表示该槽位应该被填充（此时竞争更新生产者索引）
+        // seq < pIndex  表示该槽位尚未被消费，队列已满
+        // seq > pIndex  表示该槽位已经被填充（初始为i, 填充之后 + 1）或已被消费（消费之后 + capacity）需要再下一环才能填充，此时需要重试
+
         long pIndex;
         long seqOffset;
         long seq;
@@ -330,11 +443,15 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             seq = lvLongElement(sBuffer, seqOffset);
             if (seq < pIndex)
             { // slot not cleared by consumer yet
+                // 根据seq推断推断已满，由于是relaxedOffer，因此不检查是否有消费者正在消费
                 return false;
             }
         }
         while (seq > pIndex || // another producer has moved the sequence
             !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
+
+        // Q: 这里为什么要使用Ordered模式存储？
+        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
 
         soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
         soLongElement(sBuffer, seqOffset, pIndex + 1);
@@ -346,6 +463,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
     {
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
+
+        // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
+        // seq < expectedSeq 表示尚未被填充(或已经填充但seq尚不可见)，由于是relaxedPoll，因此可以返回null
 
         long cIndex;
         long seqOffset;
@@ -359,12 +481,14 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             expectedSeq = cIndex + 1;
             if (seq < expectedSeq)
             {
+                // seq小于期望值，此时队列可能为空，也可能有生产者正在填充，由于是relaxedPoll，因此不检查是否有生产者正在填充
                 return null;
             }
         }
         while (seq > expectedSeq || // another consumer beat us to it
             !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
-
+        // CAS竞争成功，可以消费该索引对应的元素
+        // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
         final long offset = calcCircularRefElementOffset(cIndex, mask);
         final E e = lpRefElement(buffer, offset);
         soRefElement(buffer, offset, null);
@@ -379,6 +503,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
 
+        // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
+        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
+
         long cIndex;
         long seq;
         long seqOffset;
@@ -392,10 +521,16 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             expectedSeq = cIndex + 1;
             if (seq < expectedSeq)
             {
+                // seq小于期望值，此时队列可能为空，也可能有生产者正在填充，由于是relaxedPeek，因此不检查是否有生产者正在填充
                 return null;
             }
             else if (seq == expectedSeq)
             {
+                // 解释下：由于加载lvConsumerIndex和lvRefElement这是一个组合操作，
+                // 在多消费者情况下，无法保证lvRefElement加载的element是属于这个索引的，可能读取到下一环的元素，因此需要校验。
+                // 在加载该consumerIndex对应元素之后，如果消费者索引没有发生改变，那么证明这期间没有消费者消费，那么加载的元素就是我们期望的。
+                // 时序很重要，这三个加载指令都不能重排序，因此都需要使用volatile语义，否则将无法校验（类似StampedLock的用法）
+
                 final long offset = calcCircularRefElementOffset(cIndex, mask);
                 e = lvRefElement(buffer, offset);
                 if (lvConsumerIndex() == cIndex)
@@ -430,6 +565,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             final long lookAheadSeqOffset = calcCircularLongElementOffset(lookAheadIndex, mask);
             final long lookAheadSeq = lvLongElement(sBuffer, lookAheadSeqOffset);
             final long expectedLookAheadSeq = lookAheadIndex + 1;
+
+            // lookAheadSeq == expectedLookAheadSeq 表示该元素已被填充，那么此次观望是成功的，
+            // cIndex - lookAheadIndex这段元素可以被消费，如果此时CAS竞争成功，则当前消费者可以消费这一段数据
+            // 如果竞争失败，则退化为一个元素一个元素地消费
+
             if (lookAheadSeq == expectedLookAheadSeq && casConsumerIndex(cIndex, expectedLookAheadSeq))
             {
                 for (int i = 0; i < lookAheadStep; i++)
@@ -438,6 +578,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                     final long seqOffset = calcCircularLongElementOffset(index, mask);
                     final long offset = calcCircularRefElementOffset(index, mask);
                     final long expectedSeq = index + 1;
+                    // 必须等待seq为期望值（生产者已完成所有操作） - 只有当seq为期望值时，可保证元素可见，且在seq上不会发生并发修改。
                     while (lvLongElement(sBuffer, seqOffset) != expectedSeq)
                     {
 
@@ -445,19 +586,24 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                     final E e = lpRefElement(buffer, offset);
                     soRefElement(buffer, offset, null);
                     soLongElement(sBuffer, seqOffset, index + mask + 1);
+                    // 注意Consumer中对accept方法约束 - 不可以跑出异常！
+                    // 这里可以看到，如果抛出异常，剩余部分元素将永远不能被消费，从而导致队列状态被彻底破坏，再也无法工作。
                     c.accept(e);
                 }
                 consumed += lookAheadStep;
             }
             else
             {
+                // 观望失败，lookAheadSeq < expectedLookAheadSeq 表示这一段数据未被填充完毕（可能部分已被填充）
                 if (lookAheadSeq < expectedLookAheadSeq)
                 {
+                    // 判断cIndex对应的元素是否已经被填充了（cIndex表示当前要消费的元素索引），如果cIndex对应的元素尚未被填充，则证明队列为空
                     if (notAvailable(cIndex, mask, sBuffer, cIndex + 1))
                     {
                         return consumed;
                     }
                 }
+                // 退化为一个元素一个元素地消费
                 return consumed + drainOneByOne(c, remaining);
             }
         }
@@ -469,6 +615,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
         final E[] buffer = this.buffer;
+
+        // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
+        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
 
         long cIndex;
         long seqOffset;
@@ -484,12 +635,14 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 expectedSeq = cIndex + 1;
                 if (seq < expectedSeq)
                 {
+                    // 元素尚未被填充（或正在填充但seq尚不可见），由于接口对drain的语义表述为relaxedPoll，因此不检查生产者索引
                     return i;
                 }
             }
             while (seq > expectedSeq || // another consumer beat us to it
                 !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
-
+            // CAS竞争成功，可以消费该索引对应的元素
+            // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
             final long offset = calcCircularRefElementOffset(cIndex, mask);
             final E e = lpRefElement(buffer, offset);
             soRefElement(buffer, offset, null);
@@ -524,6 +677,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             final long lookAheadSeqOffset = calcCircularLongElementOffset(lookAheadIndex, mask);
             final long lookAheadSeq = lvLongElement(sBuffer, lookAheadSeqOffset);
             final long expectedLookAheadSeq = lookAheadIndex;
+
+            // lookAheadSeq == expectedLookAheadSeq 表述元素已经被消费，观望成功，
+            // pIndex - lookAheadIndex这段可以进行填充，如果cas竞争（声明）成功，这一段数据都由当前生产者填充
+            // 如果竞争失败，则退化为一个元素一个元素地填充
+
             if (lookAheadSeq == expectedLookAheadSeq && casProducerIndex(pIndex, expectedLookAheadSeq + 1))
             {
                 for (int i = 0; i < lookAheadStep; i++)
@@ -531,10 +689,15 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                     final long index = pIndex + i;
                     final long seqOffset = calcCircularLongElementOffset(index, mask);
                     final long offset = calcCircularRefElementOffset(index, mask);
+                    // 必须等待Seq为期望值（消费者已完成所有操作） - 只有当seq为期望值时，可保证元素为null，且在seq上不会产生并发更新
                     while (lvLongElement(sBuffer, seqOffset) != index)
                     {
 
                     }
+                    // Q: 这里为什么要使用Ordered模式存储？
+                    // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
+
+                    // 注意Supplier对get方法的约束- 不可抛出元素，不可返回null，否则队列将永久处于破坏状态。
                     soRefElement(buffer, offset, s.get());
                     soLongElement(sBuffer, seqOffset, index + 1);
                 }
@@ -542,19 +705,25 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             }
             else
             {
+                // 观望失败，lookAheadSeq < expectedLookAheadSeq 表示这段元素尚未完全被消费
                 if (lookAheadSeq < expectedLookAheadSeq)
                 {
+                    // 判断当前索引是否可以进行填充，如果不能填充，则直接返回（因为接口对fill接口的表述为relaxedOffer）
                     if (notAvailable(pIndex, mask, sBuffer, pIndex))
                     {
                         return produced;
                     }
                 }
+                // 退化为一个一个地填充
                 return produced + fillOneByOne(s, remaining);
             }
         }
         return limit;
     }
 
+    /**
+     * 判断指定所有的元素是否可用，说实话生产者和消费者都用该方法似乎不是个好主意。
+     */
     private boolean notAvailable(long index, long mask, long[] sBuffer, long expectedSeq)
     {
         final long seqOffset = calcCircularLongElementOffset(index, mask);
@@ -563,6 +732,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         {
             return true;
         }
+        // seq >= expectedSeq 似乎不是个好主意，实际上大于并不表示着可用的含义
         return false;
     }
 
@@ -571,6 +741,11 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long[] sBuffer = sequenceBuffer;
         final long mask = this.mask;
         final E[] buffer = this.buffer;
+
+        // seq pIndex索引对应槽位的状态值（是否已填充，已消费）
+        // seq == pIndex 表示该槽位应该被填充（此时竞争更新生产者索引）
+        // seq < pIndex  表示该槽位尚未被消费，队列已满
+        // seq > pIndex  表示该槽位已经被填充（初始为i, 填充之后 + 1）或已被消费（消费之后 + capacity）需要再下一环才能填充，此时需要重试
 
         long pIndex;
         long seqOffset;
@@ -584,11 +759,16 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 seq = lvLongElement(sBuffer, seqOffset);
                 if (seq < pIndex)
                 { // slot not cleared by consumer yet
+                    // 表示该槽位尚未被消费，队列已满，此时直接返回，因为接口对fill的语义表述为relaxedOffer
                     return i;
                 }
             }
             while (seq > pIndex || // another producer has moved the sequence
                 !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
+
+            // Q: 这里为什么要使用Ordered模式存储？
+            // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
+
             soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), s.get());
             soLongElement(sBuffer, seqOffset, pIndex + 1);
         }
