@@ -280,9 +280,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         // 注意生产者的操作时序：先CAS更新生产者索引，再发布元素，最后更新seq - 消费必须等待seq可见，否则seq上可能产生并发修改。
         // seq是完成生产者与消费者通信的关键
 
-        // Q: 这里为什么要使用Ordered模式存储？
-        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发元素。
-
+        // 理论上这里可以使用Plain模存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
         soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
         // 填充元素之后，将seq更新为pIndex + 1，需要保证原子存储，且存储元素不会重排序到该操作之后
         // seq++;
@@ -347,7 +345,6 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         // seq是完成生产者与消费者通信的关键
 
         // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
-
         final long offset = calcCircularRefElementOffset(cIndex, mask);
         final E e = lpRefElement(buffer, offset);
         soRefElement(buffer, offset, null);
@@ -450,9 +447,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         while (seq > pIndex || // another producer has moved the sequence
             !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
-        // Q: 这里为什么要使用Ordered模式存储？
-        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
-
+        // 理论上这里可以使用Plain模式存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
         soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
         soLongElement(sBuffer, seqOffset, pIndex + 1);
         return true;
@@ -694,9 +689,8 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                     {
 
                     }
-                    // Q: 这里为什么要使用Ordered模式存储？
-                    // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
 
+                    // 这里使用ordered模式存储，确保正确的构造和安全发布
                     // 注意Supplier对get方法的约束- 不可抛出元素，不可返回null，否则队列将永久处于破坏状态。
                     soRefElement(buffer, offset, s.get());
                     soLongElement(sBuffer, seqOffset, index + 1);
@@ -766,9 +760,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             while (seq > pIndex || // another producer has moved the sequence
                 !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
-            // Q: 这里为什么要使用Ordered模式存储？
-            // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发布元素。
-
+            // 这里使用ordered模式存储，确保正确的构造和安全发布
             soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), s.get());
             soLongElement(sBuffer, seqOffset, pIndex + 1);
         }

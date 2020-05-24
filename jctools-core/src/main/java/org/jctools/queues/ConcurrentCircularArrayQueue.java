@@ -120,8 +120,6 @@ abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQu
     }
 
     /**
-     * 该迭代的存在，导致了子类在填充元素时必须使用Ordered模式，感觉并不值得。
-     *
      * Get an iterator for this queue. This method is thread safe.
      * <p>
      * The iterator provides a best-effort snapshot of the elements in the queue.
@@ -177,8 +175,7 @@ abstract class ConcurrentCircularArrayQueue<E> extends ConcurrentCircularArrayQu
         private E getNext() {
             while (nextIndex < pIndex) {
                 long offset = calcCircularRefElementOffset(nextIndex++, mask);
-                // 这里导致了子类必须使用soRefElement发布元素，否则这里可能访问到未构造完成的对象。
-                // 极大了增加了子类实现的开销。
+                // 请注意：这里并没有检查seq，这里只是一个极简实现
                 E e = lvRefElement(buffer, offset);
                 if (e != null) {
                     // 这里未进行额外的尝试，因此语义等同于relaxedPeek，这也是类名Weak的含义之一

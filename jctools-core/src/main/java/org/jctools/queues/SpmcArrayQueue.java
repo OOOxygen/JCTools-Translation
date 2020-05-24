@@ -316,12 +316,12 @@ public class SpmcArrayQueue<E> extends SpmcArrayQueueL3Pad<E>
         }
 
         // 到这里表示消费者索引和删除元素都已对生产者可见，此时可以正式填充元素。
-
-        // Q: 这里为什么要使用Ordered模式存储？
-        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发元素。
         // 与poll/peek对应，消费者先确保了索引可见，然后再消费，因此不会出现消费者索引大于生产者索引的情况。
 
+        // 这里使用ordered模式存储，确保正确的构造和安全发布
         soRefElement(buffer, offset, e);
+        // 这里使用ordered模式存储，确保原子存储，以及size约束（先更新元素，再更新size）
+        // 因为是单生产者，因此使用Ordered模式存储是有效的。它同时要求了正确的发布element并允许消费者获取尾部值。
         // single producer, so store ordered is valid. It is also required to correctly publish the element
         // and for the consumers to pick up the tail value.
         soProducerIndex(currProducerIndex + 1);
@@ -448,10 +448,10 @@ public class SpmcArrayQueue<E> extends SpmcArrayQueueL3Pad<E>
             return false;
         }
 
-        // Q: 这里为什么要使用Ordered模式存储？
-        // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发元素。
-
+        // 这里使用ordered模式存储，确保正确的构造和安全发布
         soRefElement(buffer, offset, e);
+        // 这里使用ordered模式存储，确保原子存储，以及size约束（先更新元素，再更新size）
+        // 因为是单生产者，因此使用Ordered模式存储是有效的。它同时要求了正确的发布element并允许消费者获取尾部值。
         // single producer, so store ordered is valid. It is also required to correctly publish the element
         // and for the consumers to pick up the tail value.
         soProducerIndex(producerIndex + 1);
@@ -569,9 +569,9 @@ public class SpmcArrayQueue<E> extends SpmcArrayQueueL3Pad<E>
             // 由于单生产者，因此可以利用局部变量进行循环，而不必再读
             producerIndex++;
 
-            // Q: 这里为什么要使用Ordered模式存储？
-            // A: 这是个坑，超类迭代直接使用lvRefElement加载元素，因此所有子类必须保证安全发元素。
+            // 这里使用ordered模式存储，确保正确的构造和安全发布
             soRefElement(buffer, offset, s.get());
+            // 这里使用ordered模式存储，确保原子存储和size约束（先更新元素，再更新size）
             soProducerIndex(producerIndex); // ordered store -> atomic and ordered for size()
         }
         return limit;
