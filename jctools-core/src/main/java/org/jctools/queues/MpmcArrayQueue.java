@@ -258,8 +258,8 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 // 因此需要读取最新的消费者索引查看是否有消费者正在消费该槽位，如果有则需要等待，以满足Queue对offer的语义要求。
                 // Extra check required to ensure [Queue.offer == false iff queue is full]
                 if (pIndex - capacity >= cIndex && // test against cached cIndex
-                    pIndex - capacity >= (cIndex = lvConsumerIndex()))
-                { // test against latest cIndex
+                    pIndex - capacity >= (cIndex = lvConsumerIndex())) // test against latest cIndex
+                {
                     // 读取最新的消费者索引后，发现队列确实已满
                     return false;
                 }
@@ -381,7 +381,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         long expectedSeq;
         long pIndex = -1; // start with bogus value, hope we don't need it
         E e;
-        do
+        while (true)
         {
             cIndex = lvConsumerIndex();
             seqOffset = calcCircularLongElementOffset(cIndex, mask);
@@ -412,7 +412,6 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                     return e;
             }
         }
-        while (true);
     }
 
     @Override
