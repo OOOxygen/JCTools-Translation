@@ -291,6 +291,10 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
     /**
      * {@inheritDoc}
      * <p>
+     * 因为return null意味着队列为空，所以我们不能简单地依靠下一个元素的可见性(其实是seq的可见性)来进行轮询，
+     * 并且必须在下一个元素不可见时测试生产者索引。
+     *
+     * <p>
      * Because return null indicates queue is empty we cannot simply rely on next element visibility for poll
      * and must test producer index when next element is not visible.
      */

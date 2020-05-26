@@ -341,6 +341,7 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
         }
         // 注意：由于生产者是观望element是否null，以进行下一步的，因此这里使用Ordered模式可以使其更快感知到。
         // 注意：由于未等待生产者索引可见，因此这里可能导致消费者索引超过生产者索引。
+        // 这里理论上可以使用Plain模式清理元素
         soRefElement(buffer, offset, null);
         soConsumerIndex(consumerIndex + 1); // ordered store -> atomic and ordered for size()
         return e;

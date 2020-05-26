@@ -29,7 +29,22 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
  */
 public class SpscGrowableArrayQueue<E> extends BaseSpscLinkedArrayQueue<E>
 {
+    /**
+     * 队列的最大容量
+     */
     private final int maxQueueCapacity;
+    /**
+     * producerLimit的更新使用的观望步数（不太好直译）。
+     * <p>
+     * Q: 来了，来了，它又来了！这是个什么神奇的优化？
+     * A: 生产者根据element是否为null判断是否可以填充该槽位，而不是判断{@code producerIndex}与{@code consumerIndex}的大小关系。
+     * 在进行观望时，可以单步观望，也可以观望的远一点。这里假设了观望一段数据的性能好于单步观望，因此有了该设计。
+     * <p>
+     * Q: 为什么不使用capacity?
+     * A: 如果该值越大（如：capacity），那么观望到element为null的可能性越低；如果该值越小，该设计本身的意义就变小了。
+     * <p>
+     * 可参考{@link SpscArrayQueue#lookAheadStep}理解。
+     */
     private long lookAheadStep;
 
     public SpscGrowableArrayQueue(final int capacity)

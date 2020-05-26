@@ -502,7 +502,7 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
         final long cIndex = lpConsumerIndex();
         final long offset = calcCircularRefElementOffset(cIndex, mask);
 
-        // 读取为本地变量，避免在接下来的volatile读之后重新读取（读屏障会使前面的读失效）
+        // 读取为本地变量，避免在接下来的volatile读之后重新读取
         // Copy field to avoid re-reading after volatile load
         final E[] buffer = this.buffer;
 
@@ -561,7 +561,7 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
     @Override
     public E peek()
     {
-        // 读取为本地变量，避免在接下来的volatile读之后重新读取（读屏障会使前面的读失效）
+        // 读取为本地变量，避免在接下来的volatile读之后重新读取
         // Copy field to avoid re-reading after volatile load
         final E[] buffer = this.buffer;
 
