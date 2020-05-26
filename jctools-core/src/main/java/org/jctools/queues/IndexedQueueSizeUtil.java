@@ -16,6 +16,18 @@ package org.jctools.queues;
 import org.jctools.util.InternalAPI;
 
 /**
+ * 在Fast Flow模型下，当数组元素可见/不可见时就被认为可消费/填充，而不会等待对方的索引更新，因此在某个线程内可能看见特殊的索引状态，比如：
+ * <pre>
+ * {@code consumerIndex > producerIndex}
+ * {@code producerIndex - consumerIndex > capacity}
+ * </pre>
+ * 因此在计算size和isEmpty的时候，必须考虑索引问题。
+ * <p>
+ * 以上问题传送门：<br>
+ * <a href="https://github.com/JCTools/JCTools/issues/292">poll null form non-empty queue</a><br>
+ * <a href="https://github.com/JCTools/JCTools/issues/297">size may be greater than capacity</a><br>
+ * <p>
+ *
  * A note to maintainers on index assumptions: in a single threaded world it would seem intuitive to assume:
  * <pre>
  * <code>producerIndex >= consumerIndex</code>
@@ -61,6 +73,7 @@ public final class IndexedQueueSizeUtil
         {
             return Integer.MAX_VALUE;
         }
+        // （类文档）并发的更新cIndex和pIndex可能导致其中一个进度落后与另一个进度（如：FastFlow模型），因此我们需要检查边界。
         // concurrent updates to cIndex and pIndex may lag behind other progress enablers (e.g. FastFlow), so we need
         // to check bounds
         else if (size < 0)
@@ -79,6 +92,11 @@ public final class IndexedQueueSizeUtil
 
     public static boolean isEmpty(IndexedQueue iq)
     {
+        // 顺序很重要！
+        // 先读取consumerIndex再读取producerIndex，允许了生产者在加载consumerIndex之后增加procuderIndex，
+        // 这样可以保证该方法的估算值是保守的。
+        // 注意，对于MPMC，我们无法做任何事情来使其成为精确的方法。
+
         // Order matters!
         // Loading consumer before producer allows for producer increments after consumer index is read.
         // This ensures this method is conservative in it's estimate. Note that as this is an MPMC there is
