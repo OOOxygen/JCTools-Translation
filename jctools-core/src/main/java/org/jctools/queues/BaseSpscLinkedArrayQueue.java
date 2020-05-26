@@ -55,6 +55,8 @@ abstract class BaseSpscLinkedArrayQueueConsumerColdFields<E> extends BaseSpscLin
 {
     /**
      * 消费者当前消费的数组的掩码
+     * Q: 为什么为{@code buffer.length - 2}？
+     * A: 因为额外分配了一个槽位用于存储到下一个数组的指针。
      */
     protected long consumerMask;
     /**
@@ -170,13 +172,13 @@ abstract class BaseSpscLinkedArrayQueueProducerColdFields<E> extends BaseSpscLin
 {
     /**
      * 生产者当前可使用的最大生产者索引
-     * <p>
-     * Q: 为什么初始为{@code mask - 1}？
-     * A: 因为数组中最后两个位置是不可用的，一个为{@code JUMP}标记，一个为下一个数组的指针（引用）。
+     * 主意：该值一定对应于{@link #producerBuffer}，不会指向下一个数组。
      */
     protected long producerBufferLimit;
     /**
-     * 生产者当前使用的数组的掩码
+     * 生产者当前使用的数组的掩码。
+     * Q: 为什么为{@code buffer.length - 2}？
+     * A: 因为额外分配了一个槽位用于存储到下一个数组的指针。
      */
     protected long producerMask; // fixed for chunked and unbounded
 
@@ -187,15 +189,28 @@ abstract class BaseSpscLinkedArrayQueueProducerColdFields<E> extends BaseSpscLin
 }
 
 /**
- * 1. 每一个数组都类似一个{@link ConcurrentCircularArrayQueue}，只有当环上都填满数据时，才会创建新的数组。
- * 2. 消费者遇见NULL表示队列为空。
- * 3. 消费者遇见JUMP就跳跃到下一个数组。
- * 4. 消费者遇见JUMP以外的非NULL值，则表示这是一个普通元素，可直接消费。
- *
+ * Q: 关于{@code LinkedArrayQueue}?
+ * A: 队列由多个环形数组构成，在分配数组空间时，会多分配一个元素的空间，用于存储到下一个数组的指针（固定为数组的最后一个元素）。
+ * 如果当前数组已满（谨记环形数组），则分配一个新的数组空间，并使用额外申请的那个槽位执行新的数组。
  * <p>
- * 这仍然Fast Flow模型的队列：
- * 当元素不为null时，消费者就进行消费，而不等待生产者索引更新，因此消费者索引是可能超过生产者的索引的。
+ * 使用环形数组由诸多好出:
+ * 1. 可以反复利用分配的空间，只有在必要时才申请新的空间。
+ * 2. 不必纠结索引转换问题，可以使用全局索引（pIndex,cIndex），而不必每个数组一个索引。
+ * 3. 由于使用mask和index计算真实槽位，因此额外分配的槽位是不会被计算到的，更加简单。
+ * <p>
+ * PS: 这是很优秀的设计，应该学习。
+ * <p>
+ * 仍然是Fast Flow模型的队列，因此也会出现和{@link SpscArrayQueue}相似的索引重排序问题，
  * 不过在对{@link IndexedQueueSizeUtil}修改中，允许了这种情况，并对外进行了屏蔽。
+ * <p>
+ * 对于消费者：
+ * 1. 遇见NULL表示队列为空。
+ * 2. 遇见JUMP就跳跃到下一个数组。
+ * 3. 遇见JUMP以外的非NULL值，则表示这是一个普通元素，可直接消费。
+ * <p>
+ * 对于生产者：
+ * 1. 遇见NULL表示可以填充。
+ * 2. 遇见非NULL表示队列已满，进行扩容或返回失败。
  */
 abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProducerColdFields<E>
     implements MessagePassingQueue<E>, QueueProgressIndicators
@@ -203,11 +218,6 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
 
     /**
      * 跳点 - 它表示该索引对应的元素在下一个数组中，当前数组已满或已空。
-     * <p>
-     * Q: 如果我们默认数组的最后一个元素为下一个数组的指针的话，那么应该是不需要该标记的，那为什么需要呢？
-     * A: 在JCTools中并没有使用这种简单的设计，每一个数组都是一个环形数组，只有当环上都填满数据时，才会创建新的数组。
-     * 因此我们需要一个标记，遇到该标记时，表示应该跳转到下一个环形数组。
-     * PS: 这是很优秀的设计，应该学习 。
      */
     private static final Object JUMP = new Object();
 
@@ -250,8 +260,8 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
     /**
      * storeOrderedNext
      * 将旧数组链接到新数组，需要提供时序保证。
-     * （使用Ordered模式，以保证消费者在读取到下一个数组的指针时，可确保上一个元素已发布）
-     * PS：实际发行这里的Ordered模式是冗余的，因为在发布{@link #JUMP}之前，下一个数组是不可达的。
+     * （使用Ordered模式，可保证消费者在读取到下一个数组的指针时，上一个元素已可见）
+     * PS：实际发现这里的Ordered模式是冗余的，因为在发布{@link #JUMP}之前，下一个数组是不可达的。
      */
     protected final void soNext(E[] curr, E[] next)
     {
@@ -346,7 +356,7 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
             // expected hot path
             if (index < producerBufferLimit)
             {
-                // 这里写成for循环插入会更好点，可以减少上面的读
+                // 这里写成for循环插入会更好点，可以减少上面的读 - 这里不会创建新的数组
                 // 因为是单生产者，因此如果生产者索引如果小于当前限制，则可以确定可以安全的插入
                 writeToQueue(buffer, s.get(), index, offset);
             }
@@ -404,9 +414,8 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
     }
 
     /**
-     * 通过冷路径插入元素 - 可能需要触发扩容。
-     * 冷路径：我们认为可能很少执行的代码块。
-     * 既然只是个期望，那么也不能说真的很少走到。
+     * 通过冷路径插入元素 - 根据缓存认为当前不能插入元素，可能需要调整{@link #producerBufferLimit}或创建新的数组。
+     * 冷路径：我们认为可能很少执行的代码块。既然只是个期望，那么也不能说真的很少走到（到达容量上限，而消费者消费较慢时就会频繁走到）。
      *
      * @param buffer 当前数组
      * @param mask   当前数组对应的掩码
@@ -445,8 +454,8 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
             // 下一个元素不为null，且不是跳点标记，即该元素是一个正常元素，直接返回。
             // 生产者的安全发布，保证了这里可以直接消费，而不必等待生产者索引可见
 
-            // Q: 这里能否交换顺序？
-            // A: 不可以，生产者依赖于消费者的索引，而不是依赖于element为null，因此消费者索引对生产者更重要，需要先更新。
+            // 更新索引和清理元素在Fast Flow模型队列下是可以调整顺序的（其实都会有重排序问题）
+            // 生产者是根据element是否为null，进行下一步的，因此先清理element，可能更好
 
             // Ordered模式确保原子存储
             soConsumerIndex(index + 1);// this ensures correctness on 32bit platforms
@@ -543,8 +552,6 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
 
     /**
      * 从下一个数组中peek元素。
-     * Q: 这个索引一定落在数组的第一个元素吗？？？
-     * A: 不一定，每一个数组都相当于一个循环数组队列{@link ConcurrentCircularArrayQueue}，因此不一定落在第一个位置。
      *
      * @param buffer 当前数组
      * @param index  当前生产者索引
@@ -558,7 +565,7 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
         final long mask = length(nextBuffer) - 2;
         consumerMask = mask;
 
-        // 这里一定是一个新元素，因为这里是新数组
+        // 基于linkOldToNew的设计，这里一定不为null，如果为null，则可能是supplier返回了null
         final long offset = calcCircularRefElementOffset(index, mask);
         return lvRefElement(nextBuffer, offset);
     }
@@ -579,7 +586,7 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
         }
         else
         {
-            // 注意和poll相同的时序，先更新的索引，再清理的元素
+            // 注意和poll相同的时序，先更新的索引，再清理的元素 - 其实颠倒顺序更好
             soConsumerIndex(index + 1);// this ensures correctness on 32bit platforms
             soRefElement(nextBuffer, offset, null);
             return n;
