@@ -63,19 +63,19 @@ public class SpscUnboundedArrayQueue<E> extends BaseSpscLinkedArrayQueue<E>
         // go around the buffer or add a new buffer
         if (null == lvRefElement(buffer, calcCircularRefElementOffset(pBufferLimit, mask)))
         {
-            // 观望到当前数组接下来lookAheadStep个元素都为null，观望成功，不必扩容
+            // 观望到当前数组尚有多个空间为null（大于等于3个槽），可以直接插入元素
             producerBufferLimit = pBufferLimit - 1; // joy, there's plenty of room
             writeToQueue(buffer, v == null ? s.get() : v, pIndex, offset);
         }
         // 观望失败，退化为单步检查
         else if (null == lvRefElement(buffer, calcCircularRefElementOffset(pIndex + 1, mask)))
         { // buffer is not full
-            // 下一个元素为null，表面当前数组未满，可以直接插入元素
+            // 有两个槽可用，则当前尚可以继续插入，不必扩容
             writeToQueue(buffer, v == null ? s.get() : v, pIndex, offset);
         }
         else
         {
-            // 下一个元素不为null，证明队列已满，需要触发扩容，需要分配一个新数组，并将引用存储到当前buffer的末尾
+            // 只有一个槽可用，则当前槽用于存储JUMP标记，并进行扩容
             // 数组的最后一个插槽是额外分配的，是用于存储到下一个数组的指针的，因此数组并不是真正的已满
             // 注意这里分配的数组长度：它总是和当前数组的长度相同，mask + 2 其实就是 buffer.length
 

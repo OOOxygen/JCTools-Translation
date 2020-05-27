@@ -173,6 +173,9 @@ abstract class BaseSpscLinkedArrayQueueProducerColdFields<E> extends BaseSpscLin
     /**
      * 生产者在当前{@link #producerBuffer}上第一个不可使用的生产者索引。
      * 主意：该值一定对应于{@link #producerBuffer}，不会指向下一个数组。
+     * <p>
+     * Q: 为什么更新时总是伴随着{@code - 1}?
+     * A: 因为需要预留一个槽位存储JUMP标记，因此实际可用空间要减1。
      */
     protected long producerBufferLimit;
     /**
