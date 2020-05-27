@@ -171,7 +171,7 @@ abstract class BaseSpscLinkedArrayQueueProducerFields<E> extends BaseSpscLinkedA
 abstract class BaseSpscLinkedArrayQueueProducerColdFields<E> extends BaseSpscLinkedArrayQueueProducerFields<E>
 {
     /**
-     * 生产者当前可使用的最大生产者索引
+     * 生产者在当前{@link #producerBuffer}上第一个不可使用的生产者索引。
      * 主意：该值一定对应于{@link #producerBuffer}，不会指向下一个数组。
      */
     protected long producerBufferLimit;
@@ -191,7 +191,7 @@ abstract class BaseSpscLinkedArrayQueueProducerColdFields<E> extends BaseSpscLin
 /**
  * Q: 关于{@code LinkedArrayQueue}?
  * A: 队列由多个环形数组构成，在分配数组空间时，会多分配一个元素的空间，用于存储到下一个数组的指针（固定为数组的最后一个元素）。
- * 如果当前数组已满（谨记环形数组），则分配一个新的数组空间，并使用额外申请的那个槽位执行新的数组。
+ * 如果当前数组已满（谨记环形数组），则分配一个新的数组空间，并使用额外申请的那个槽位指向新的数组。
  * <p>
  * 使用环形数组由诸多好出:
  * 1. 可以反复利用分配的空间，只有在必要时才申请新的空间。
@@ -273,6 +273,7 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
      * loadVolatileNextArrayAndUnlink
      * 加载下一个数组，并断开到下一个数组的连接。
      * （使用volatile模式，以确保它在接下来的读操作之前完成，以确保接下来的读操作是有效的）
+     * PS: 这里的volatile语义似乎也是多余的。
      */
     @SuppressWarnings("unchecked")
     protected final E[] lvNextArrayAndUnlink(E[] curr)
@@ -454,6 +455,7 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
             // 下一个元素不为null，且不是跳点标记，即该元素是一个正常元素，直接返回。
             // 生产者的安全发布，保证了这里可以直接消费，而不必等待生产者索引可见
 
+            // 有子类在扩容时依赖消费者索引，因此先更新了consumerIndex
             // 更新索引和清理元素在Fast Flow模型队列下是可以调整顺序的（其实都会有重排序问题）
             // 生产者是根据element是否为null，进行下一步的，因此先清理element，可能更好
 
@@ -496,18 +498,18 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
             return newBufferPeek(buffer, index);
         }
 
-        // element 为null，或未普通元素
+        // element 为null，或为普通元素
         return (E) e;
     }
 
     /**
-     * 将旧数组连接到新数组，并插入给定元素
+     * 触发了扩容，将旧数组链接到新数组，并插入给定元素
      *
      * @param currIndex   生产者索引
      * @param oldBuffer   生产者当前使用的数组
      * @param offset      生产者索引对应的元素在旧数组中的偏移量
      * @param newBuffer   需要链接的下一个数组
-     * @param offsetInNew 生产者索引对应的元素在新数组中的偏移量
+     * @param offsetInNew 生产者索引对应的元素在新数组中的偏移量（如果新数组的大小和当前数组的大小不同，那么偏移量也不同）
      * @param e           待插入的元素
      */
     final void linkOldToNew(

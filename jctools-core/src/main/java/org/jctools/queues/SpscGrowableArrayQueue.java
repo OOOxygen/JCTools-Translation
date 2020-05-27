@@ -41,7 +41,7 @@ public class SpscGrowableArrayQueue<E> extends BaseSpscLinkedArrayQueue<E>
      * 在进行观望时，可以单步观望，也可以观望的远一点。这里假设了观望一段数据的性能好于单步观望，因此有了该设计。
      * <p>
      * Q: 为什么不使用capacity?
-     * A: 如果该值越大（如：capacity），那么观望到element为null的可能性越低；如果该值越小，该设计本身的意义就变小了。
+     * A: 观望步数越小，该设计的意义越小，越接近capacity就越容易失败，1/4可能是他们总结的一个经验值或理论值。
      * <p>
      * 可参考{@link SpscArrayQueue#lookAheadStep}理解。
      */
