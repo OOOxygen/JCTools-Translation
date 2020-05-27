@@ -31,6 +31,9 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
 
 abstract class BaseMpscLinkedArrayQueuePad1<E> extends AbstractQueue<E> implements IndexedQueue
 {
+    /**
+     * 缓存行填充，避免{@code producerIndex}上产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -54,19 +57,37 @@ abstract class BaseMpscLinkedArrayQueueProducerFields<E> extends BaseMpscLinkedA
 {
     private final static long P_INDEX_OFFSET = fieldOffset(BaseMpscLinkedArrayQueueProducerFields.class, "producerIndex");
 
+    /**
+     * 生产者索引 - 由于是多生产者，因此是先竞争更新索引，再填充元素。
+     * 注意：真正的索引其实是{@code producerIndex >> 1}，最低位用于表示队列的状态（是否正在调整大小）。
+     * 将队列的状态存储在索引中，这样可以避免读取多个字段，以及并发更新问题。
+     * PS: {@link java.util.concurrent.ThreadPoolExecutor}也有相似设计。
+     */
     private volatile long producerIndex;
 
+    /**
+     * loadVolatileProducerIndex
+     * 多生产者模式下都必须使用volatile模式加载最新值
+     */
     @Override
     public final long lvProducerIndex()
     {
         return producerIndex;
     }
 
+    /**
+     * storeOrderedProducerIndex
+     * 当某个线程获得唯一修改权期间（resize期间），可以使用该模式更新索引。
+     * 其实我觉得应该用volatile模式写，保证对其它线程的立即可见性，否则其它线程会有较长时间的自旋。
+     */
     final void soProducerIndex(long newValue)
     {
         UNSAFE.putOrderedLong(this, P_INDEX_OFFSET, newValue);
     }
 
+    /**
+     * 生产者竞争索引，成功那个可以填充对应的槽位
+     */
     final boolean casProducerIndex(long expect, long newValue)
     {
         return UNSAFE.compareAndSwapLong(this, P_INDEX_OFFSET, expect, newValue);
@@ -75,6 +96,9 @@ abstract class BaseMpscLinkedArrayQueueProducerFields<E> extends BaseMpscLinkedA
 
 abstract class BaseMpscLinkedArrayQueuePad2<E> extends BaseMpscLinkedArrayQueueProducerFields<E>
 {
+    /**
+     * 缓存行填充，避免{@code consumerIndex}和{@code producerIndex}上产生伪共享。
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -98,21 +122,43 @@ abstract class BaseMpscLinkedArrayQueueConsumerFields<E> extends BaseMpscLinkedA
 {
     private final static long C_INDEX_OFFSET = fieldOffset(BaseMpscLinkedArrayQueueConsumerFields.class,"consumerIndex");
 
+    /**
+     * 消费者索引
+     * 因为生产者依赖于消费者的索引，因此消费者需要先清除元素再更新索引，以确保不会产生清除掉生产者填充的数据（不会并发修改同一槽位）。
+     */
     private volatile long consumerIndex;
+    /**
+     * 消费当前消费的数组的掩码
+     */
     protected long consumerMask;
+    /**
+     * 消费者当前消费的数组
+     */
     protected E[] consumerBuffer;
 
+    /**
+     * loadVolatileConsumerIndex
+     * 非消费者线程使用该方法读取
+     */
     @Override
     public final long lvConsumerIndex()
     {
         return consumerIndex;
     }
 
+    /**
+     * loadPlainConsumerIndex
+     * 消费者使用该方法读取即可
+     */
     final long lpConsumerIndex()
     {
         return UNSAFE.getLong(this, C_INDEX_OFFSET);
     }
 
+    /**
+     * storeOrderedConsumerIndex
+     * 消费者使用该方法更新索引，以确保原子存储，且对生产者的可见性，此外还保证了槽位上不会发生并发更新。
+     */
     final void soConsumerIndex(long newValue)
     {
         UNSAFE.putOrderedLong(this, C_INDEX_OFFSET, newValue);
@@ -144,20 +190,51 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 {
     private final static long P_LIMIT_OFFSET = fieldOffset(BaseMpscLinkedArrayQueueColdProducerFields.class,"producerLimit");
 
+    /**
+     * 在重新读取消费者索引之前，第一个不可用的生产者索引。
+     * <p>
+     * Q: 这部分数据需要与{@code producerIndex}分开吗？
+     * A: 因为是多生产模式，因此producerIndex上将产生高度竞争，因此其所在的缓存行极易失效，
+     * 将这部分数据与producerIndex分开，我们期望该这部分数据大部分时间位于用于共享（且很少失效）的缓存行中。
+     * PS: 这也隔得太远了，为啥不把消费者的放最上面？
+     */
     private volatile long producerLimit;
+    /**
+     * 生产者当前使用的数组的掩码
+     * 注意：用{@code producerIndex}一样，都进行了左移，最低位始终为0。
+     * <p>
+     * Q: 为啥mask为{@code (buffer.length - 2) << 1}?
+     * A: 数组的真实长度为2的n次幂+1，数组最后一个元素用于存储到下一个数组的索引，因此有{@code buffer.length-2}，
+     * 左移一位是为了对齐{@code producerIndex}，因为生产者索引的最低位用于表示当前是否正在进行resize（扩容）。
+     */
     protected long producerMask;
+    /**
+     * 生产者当前使用的数组 - 在resize时会更新。
+     */
     protected E[] producerBuffer;
 
+    /**
+     * loadVolatileProducerLimit
+     * 多生产者模式下，都必须使用volatile模式读取
+     */
     final long lvProducerLimit()
     {
         return producerLimit;
     }
 
+    /**
+     * 在其它队列实现中，很少有CAS更新producerLimit的，这里我的理解是为了减少对{@code offerSlowPath}的调用，
+     * 因此需要确保producerLimit递增更新，而不会并发更新为一个更小的值。
+     */
     final boolean casProducerLimit(long expect, long newValue)
     {
         return UNSAFE.compareAndSwapLong(this, P_LIMIT_OFFSET, expect, newValue);
     }
 
+    /**
+     * storeOrderedProducerLimit
+     * 在该队列实现中，只有resize的线程调用该方法，即有独占权时可以使用该方法更新，其它线程只有看见最新值时才能进行下一步。
+     */
     final void soProducerLimit(long newValue)
     {
         UNSAFE.putOrderedLong(this, P_LIMIT_OFFSET, newValue);
@@ -166,6 +243,9 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
 
 /**
+ * 多生产者单消费者模式的基于LinkedArray的队列，不难想到，复杂度主要在生产者竞争扩容。
+ * 这里没有进行后向填充，子类需要处理后向填充问题
+ *
  * An MPSC array queue which starts at <i>initialCapacity</i> and grows to <i>maxCapacity</i> in linked chunks
  * of the initial size. The queue grows only when the current buffer is full and elements are not copied on
  * resize, instead a link to the new buffer is stored in the old buffer for the consumer to follow.
@@ -174,11 +254,32 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     implements MessagePassingQueue<E>, QueueProgressIndicators
 {
     // No post padding here, subclasses must add
+    /**
+     * 跳点标记，表示当前索引对应的元素在下一个数组。
+     * 对于生产者而言，表示resize已完成，大家需要到下一个数组竞争索引和填充元素。
+     * 对于消费者而言，表示当前数组已消费完成，需要跳转到下一个数组进行消费。
+     */
     private static final Object JUMP = new Object();
+    /**
+     * 标记当前数组已被完全消费 - 用于区分队列已空还是当前数组已断开连接，这是引入{@link WeakIterator}导致的。
+     */
     private static final Object BUFFER_CONSUMED = new Object();
+
+    /**
+     * 跳转到CAS竞争索引代码块
+     */
     private static final int CONTINUE_TO_P_INDEX_CAS = 0;
+    /**
+     * 简单重试(continue)
+     */
     private static final int RETRY = 1;
+    /**
+     * 队列已满
+     */
     private static final int QUEUE_FULL = 2;
+    /**
+     * 获得resize权（此时其它生产者需要等待resize完成）
+     */
     private static final int QUEUE_RESIZE = 3;
 
 
@@ -205,6 +306,14 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     @Override
     public int size()
     {
+        // 该算法简化一下，如下：
+        // long cIndex = lvConsumerIndex();
+        // long size = (lvProducerIndex() - cIndex) >> 1;
+
+        // 提示：因为索引都是偶数，因此不能使用IndexedQueueSizeUtil (其实生产者索引可能为奇数，严格的说是索引都是位移后的，因此不能直接使用工具类计算)
+        // 由于当前线程在读取producerIndex和consumerIndex期间可能被中断或被重新调度，因此我们需要保证size在有效范围。
+        // 在当前方法计算size的时候，并发的poll/offer事件是可能的，因此在读取producerIndex之前读取consumerIndex。
+
         // NOTE: because indices are on even numbers we cannot use the size util.
 
         /*
@@ -222,6 +331,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             after = lvConsumerIndex();
             if (before == after)
             {
+                // 走到这，意味着这期间没有消费者消费，size就更精确，不过实际意义不大
                 size = ((currentProducerIndex - after) >> 1);
                 break;
             }
@@ -241,6 +351,14 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     @Override
     public boolean isEmpty()
     {
+        // 顺序很重要！
+        // 先读取consumerIndex再读取producerIndex，允许了生产者在加载consumerIndex之后增加procuderIndex，
+        // 这样可以保证该方法的估算值是保守的。
+        // 注意，对于MPMC，我们无法做任何事情来使其成为精确的方法。
+
+        // 注意：我们的生产者索引是可能为奇数的，在resize的时候！
+        // 此时虽然索引不等，但是队列其实是空的，在完成扩容之后，生产者才会真正竞争下一个索引和填充元素。
+
         // Order matters!
         // Loading consumer before producer allows for producer increments after consumer index is read.
         // This ensures this method is conservative in it's estimate. Note that as this is an MPMC there is
@@ -273,13 +391,21 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             // lower bit is indicative of resize, if we see it we spin until it's cleared
             if ((pIndex & 1) == 1)
             {
+                // 最后1位为1，表示有生产者正在扩容，此时需要等待扩容完毕
                 continue;
             }
+            // pIndex为偶数（低位为0） -> 真实的索引为 pIndex >> 1
+            // mask和buffer可能因为某个生产者扩容导致改变 -> 仅用于CAS成功后的数组访问
+
             // pIndex is even (lower bit is 0) -> actual index is (pIndex >> 1)
 
             // mask/buffer may get changed by resizing -> only use for array access after successful CAS.
             mask = this.producerMask;
             buffer = this.producerBuffer;
+
+            // 一个成功的CAS建立了特定时序：lv(pIndex) - [mask/buffer] -> cas(pIndex)
+            // 该优化背后的假设是队列几乎总是空的或接近空的 - 如果队列几乎总是满的，那么这里性能就很差
+
             // a successful CAS ties the ordering, lv(pIndex) - [mask/buffer] -> cas(pIndex)
 
             // assumption behind this optimization is that queue is almost always empty or near empty
@@ -289,22 +415,30 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 switch (result)
                 {
                     case CONTINUE_TO_P_INDEX_CAS:
+                        // 竞争更新producerLimit成功，尚有可用空间，当前索引可以进行填充
+                        // 这个break有点迷惑性，跳出的是switch，而不是跳出循环
                         break;
                     case RETRY:
                         continue;
                     case QUEUE_FULL:
+                        // 队列已满，返回false
                         return false;
                     case QUEUE_RESIZE:
+                        // 获取扩容权，进行扩容
                         resize(mask, buffer, pIndex, e, null);
                         return true;
                 }
             }
 
+            // pIndex未超过限制（缓存的或最新的限制），尝试竞争索引(+2是因为索引进行了左移)
             if (casProducerIndex(pIndex, pIndex + 2))
             {
                 break;
             }
         }
+        // 此时所以已经对其它线程可见，因此消费者必须处理索引可见，但元素尚未填充或尚不可见的情况
+        // 使用Ordered模式尽快的对消费者可见，因为消费者依赖于element的可见性，以减少对producerIndex的依赖 - CAS已经保证了正确的构造。
+
         // INDEX visible before ELEMENT
         final long offset = modifiedCalcCircularRefElementOffset(pIndex, mask);
         soRefElement(buffer, offset, e); // release element e
@@ -330,6 +464,12 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         {
             if (index != lvProducerIndex())
             {
+                // 如果resize失败或supplier抛出异常，消费者将死锁。
+                // 目前来看，所有的队列都有死锁风险，但是这里多了一个resize风险
+
+                // index != producerIndex，表示有生产者正在填充或正在扩容，即将有新元素被填充，因此自旋等待，直到元素可见，
+                // 以满足Queue对poll的语义要求：当且仅当队列为空时返回null。
+
                 // poll() == null iff queue is empty, null element is not strong enough indicator, so we must
                 // check the producer index. If the queue is indeed not empty we spin until element is
                 // visible.
@@ -341,17 +481,23 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             }
             else
             {
+                // 队列为空，返回null
                 return null;
             }
         }
 
+        // 到这里表示元素已对消费者可见（不为null），可能为普通元素或跳点
+        // 元素为跳点，表示需要跳转到下一个数组
         if (e == JUMP)
         {
             final E[] nextBuffer = nextBuffer(buffer, mask);
             return newBufferPoll(nextBuffer, index);
         }
 
+        // 因为生产者保证了安全发布，因此这里可以直接消费，不必等待生产者索引可见
         soRefElement(buffer, offset, null); // release element null
+        // 这里使用Ordered模式保证原子存储，以及尽快对生产者可见，以前确保元素清理在这之前完成（避免并发更新同一槽位）
+        // 注意位移，因此这里实际是 真实索引+1
         soConsumerIndex(index + 2); // release cIndex
         return (E) e;
     }
@@ -373,6 +519,9 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         Object e = lvRefElement(buffer, offset);
         if (e == null && index != lvProducerIndex())
         {
+            // 元素为null，但队列不为空，表示有生产者正在填充或正在扩容，即将有新元素被填充，因此自旋等待，直到元素可见，
+            // 以满足Queue对peek的语义要求：当且仅当队列为空时返回null。
+
             // peek() == null iff queue is empty, null element is not strong enough indicator, so we must
             // check the producer index. If the queue is indeed not empty we spin until element is visible.
             do
@@ -381,23 +530,32 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             }
             while (e == null);
         }
+        // 到这里，元素可能为null，或JUMP标记，或普通元素
         if (e == JUMP)
         {
+            // 元素为跳点标记，则更新消费的数组，然后从新数组中peek元素
             return newBufferPeek(nextBuffer(buffer, mask), index);
         }
+        // 普通元素或null
         return (E) e;
     }
 
     /**
+     * 我们不会在此方法中内联resize，因为我们不会在fill时调整大小。
+     * 实际上fill时也调用resize了，注释可能有问题。。。
+     *
      * We do not inline resize into this method because we do not resize on fill.
      */
     private int offerSlowPath(long mask, long pIndex, long producerLimit)
     {
+        // 读取最新的消费者索引，判断队列是否已满，以及已满的情况下是否可以扩容
         final long cIndex = lvConsumerIndex();
         long bufferCapacity = getCurrentBufferCapacity(mask);
 
         if (cIndex + bufferCapacity > pIndex)
         {
+            // cIndex + bufferCapacity 为最新的producerLimit
+            // 如果pIndex < producerLimit，则证明尚有可用空间，
             if (!casProducerLimit(producerLimit, cIndex + bufferCapacity))
             {
                 // retry from top
@@ -409,37 +567,50 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 return CONTINUE_TO_P_INDEX_CAS;
             }
         }
+        // 到这里表示队列已满，需要判断是否可以扩容
         // full and cannot grow
         else if (availableInQueue(pIndex, cIndex) <= 0)
         {
+            // 没有可用空间，队列已满，且不可以扩容
             // offer should return false;
             return QUEUE_FULL;
         }
+        // 在这里表示可以继续扩容，需要CAS竞争 -> 将最低位设置为1
         // grab index for resize -> set lower bit
         else if (casProducerIndex(pIndex, pIndex + 1))
         {
+            // 赢得resize(扩容)权，接下来进行扩容
             // trigger a resize
             return QUEUE_RESIZE;
         }
         else
         {
+            // 竞争扩容权失败，从头开始
             // failed resize attempt, retry from top
             return RETRY;
         }
     }
 
     /**
+     * 获取队列中可插入的元素的个数
+     *
      * @return available elements in queue * 2
+     * 由于pIndex和cIndex都是真实索引的二倍，因此返回结果也是可用空间的二倍，方便计算。
      */
     protected abstract long availableInQueue(long pIndex, long cIndex);
 
+    /**
+     * 其实是加载下一个数组，并更新为当前消费中的数组
+     */
     @SuppressWarnings("unchecked")
     private E[] nextBuffer(final E[] buffer, final long mask)
     {
         final long offset = nextArrayOffset(mask);
         final E[] nextBuffer = (E[]) lvRefElement(buffer, offset);
         consumerBuffer = nextBuffer;
+        // 再次注意mask的计算方式
         consumerMask = (length(nextBuffer) - 2) << 1;
+        // 标记为已消费，迭代器使用到了该标记
         soRefElement(buffer, offset, BUFFER_CONSUMED);
         return nextBuffer;
     }
@@ -449,6 +620,10 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         return modifiedCalcCircularRefElementOffset(mask + 2, Long.MAX_VALUE);
     }
 
+    /**
+     * 消费到跳点，需要从下一个数组poll元素
+     * (此时已经调用{@link #nextBuffer(Object[], long)})
+     */
     private E newBufferPoll(E[] nextBuffer, long index)
     {
         final long offset = modifiedCalcCircularRefElementOffset(index, consumerMask);
@@ -457,11 +632,17 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         {
             throw new IllegalStateException("new buffer must have at least one element");
         }
+        // 由于生产者依赖的是消费者的索引，因此这里可以使用Plain模式清理
         soRefElement(nextBuffer, offset, null);
+        // index + 2，实际上是真实索引+1
         soConsumerIndex(index + 2);
         return n;
     }
 
+    /**
+     * 消费到跳点，需要从下一个数组peek元素
+     * (此时已经调用{@link #nextBuffer(Object[], long)})
+     */
     private E newBufferPeek(E[] nextBuffer, long index)
     {
         final long offset = modifiedCalcCircularRefElementOffset(index, consumerMask);
@@ -506,13 +687,17 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         Object e = lvRefElement(buffer, offset);
         if (e == null)
         {
+            // 此时可能队列为空，可能有生产者正在填充但元素尚不可见，由于是relaxedPoll，因此可以直接返回
             return null;
         }
         if (e == JUMP)
         {
+            // 元素是跳点，更新当前消费数组为下一个数组，并从新数组中poll元素
             final E[] nextBuffer = nextBuffer(buffer, mask);
             return newBufferPoll(nextBuffer, index);
         }
+        // 元素为普通元素，生产者进行了安全发布，因此可直接消费
+        // 这里其实可以使用Plain模式清理元素，因为生产者依赖于消费者的索引，而不是element的可见性
         soRefElement(buffer, offset, null);
         soConsumerIndex(index + 2);
         return (E) e;
@@ -530,8 +715,10 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         Object e = lvRefElement(buffer, offset);
         if (e == JUMP)
         {
+            // e为跳点，表示需要更新当前消费数组，并从新数组中peek元素
             return newBufferPeek(nextBuffer(buffer, mask), index);
         }
+        // null或普通元素，可直接返回（生产者保证了安全发布）
         return (E) e;
     }
 
@@ -659,6 +846,9 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         return new WeakIterator(consumerBuffer, lvConsumerIndex(), lvProducerIndex());
     }
 
+    /**
+     * 不译注该类，使用有限，不想费脑细胞。。。
+     */
     private static class WeakIterator<E> implements Iterator<E>
     {
         private final long pIndex;
@@ -763,6 +953,8 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         catch (OutOfMemoryError oom)
         {
             assert lvProducerIndex() == pIndex + 1;
+            // 回滚了生产者索引，非常危险，消费者如果在等待该索引，将出现问题
+            // 不过目前来看，所有的队列都有死锁风险，比如supplier抛出异常，或返回null
             soProducerIndex(pIndex);
             throw oom;
         }
@@ -796,11 +988,15 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     }
 
     /**
+     * 获取下一个数组(buffer)的大小，返回值需要包括到下一个数组的指针
+     *
      * @return next buffer size(inclusive of next array pointer)
      */
     protected abstract int getNextBufferSize(E[] buffer);
 
     /**
+     * 获取当前数组的容量（不包含JUMP和到下一个数组的指针），由于mask是带有位移的，为了方便运算，返回值也需要进行位移运算。
+     *
      * @return current buffer capacity for elements (excluding next pointer and jump entry) * 2
      */
     protected abstract long getCurrentBufferCapacity(long mask);
