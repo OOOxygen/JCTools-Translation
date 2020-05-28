@@ -280,8 +280,9 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         // 注意生产者的操作时序：先CAS更新生产者索引，再发布元素，最后更新seq - 消费必须等待seq可见，否则seq上可能产生并发修改。
         // seq是完成生产者与消费者通信的关键
 
-        // 理论上这里可以使用Plain模存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
-        soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
+        // 这里可以使用Plain模存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
+        // casProducerIndex ensures correct construction
+        spRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
         // 填充元素之后，将seq更新为pIndex + 1，需要保证原子存储，且存储元素不会重排序到该操作之后
         // seq++;
         soLongElement(sBuffer, seqOffset, pIndex + 1);
@@ -348,10 +349,10 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         // 注意消费者的操作时序：先CAS更新consumerIndex，再删除元素，最后再更新seq - 生产者也必须等待seq可见，否则seq上可能产生并发修改。
         // seq是完成生产者与消费者通信的关键
 
-        // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
+        // 这里可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
         final long offset = calcCircularRefElementOffset(cIndex, mask);
         final E e = lpRefElement(buffer, offset);
-        soRefElement(buffer, offset, null);
+        spRefElement(buffer, offset, null);
         // 更新seq为下一环的序号，生产者在下一环的时候填充
         // i.e. seq += capacity
         soLongElement(sBuffer, seqOffset, cIndex + mask + 1);
@@ -450,8 +451,9 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         while (seq > pIndex || // another producer has moved the sequence
             !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
-        // 理论上这里可以使用Plain模式存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
-        soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
+        // 这里可以使用Plain模式存储，因为前面的CAS已经保证了正确的构造，可以安全的发布，且消费者依赖于seq可见
+        // casProducerIndex ensures correct construction
+        spRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), e);
         soLongElement(sBuffer, seqOffset, pIndex + 1);
         return true;
     }
@@ -486,10 +488,10 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         while (seq > expectedSeq || // another consumer beat us to it
             !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
         // CAS竞争成功，可以消费该索引对应的元素
-        // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
+        // 这里可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
         final long offset = calcCircularRefElementOffset(cIndex, mask);
         final E e = lpRefElement(buffer, offset);
-        soRefElement(buffer, offset, null);
+        spRefElement(buffer, offset, null);
         soLongElement(sBuffer, seqOffset, cIndex + mask + 1);
         return e;
     }
@@ -582,7 +584,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
 
                     }
                     final E e = lpRefElement(buffer, offset);
-                    soRefElement(buffer, offset, null);
+                    spRefElement(buffer, offset, null);
                     soLongElement(sBuffer, seqOffset, index + mask + 1);
                     // 注意Consumer中对accept方法约束 - 不可以跑出异常！
                     // 这里可以看到，如果抛出异常，剩余部分元素将永远不能被消费，从而导致队列状态被彻底破坏，再也无法工作。
@@ -640,10 +642,10 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             while (seq > expectedSeq || // another consumer beat us to it
                 !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
             // CAS竞争成功，可以消费该索引对应的元素
-            // 理论上这里是可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
+            // 这里可以使用Plain模式清理元素，因为生产者必须等待seq为期望值时才能填充元素。
             final long offset = calcCircularRefElementOffset(cIndex, mask);
             final E e = lpRefElement(buffer, offset);
-            soRefElement(buffer, offset, null);
+            spRefElement(buffer, offset, null);
             soLongElement(sBuffer, seqOffset, cIndex + mask + 1);
             c.accept(e);
         }
@@ -695,6 +697,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
 
                     // 这里使用ordered模式存储，确保正确的构造和安全发布
                     // 注意Supplier对get方法的约束- 不可抛出元素，不可返回null，否则队列将永久处于破坏状态。
+                    // Ordered store ensures correct construction
                     soRefElement(buffer, offset, s.get());
                     soLongElement(sBuffer, seqOffset, index + 1);
                 }
@@ -764,6 +767,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
             // 这里使用ordered模式存储，确保正确的构造和安全发布
+            // Ordered store ensures correct construction
             soRefElement(buffer, calcCircularRefElementOffset(pIndex, mask), s.get());
             soLongElement(sBuffer, seqOffset, pIndex + 1);
         }

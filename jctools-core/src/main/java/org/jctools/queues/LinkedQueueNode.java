@@ -80,6 +80,15 @@ final class LinkedQueueNode<E>
     }
 
     /**
+     * storePlainNext
+     * 在批量插入的时候，可以依靠后续的{@code soProducerNode}实现安全发布
+     */
+    public void spNext(LinkedQueueNode<E> n)
+    {
+        UNSAFE.putObject(this, NEXT_OFFSET, n);
+    }
+
+    /**
      * loadVolatileNext - 使用volatile语义读取next的值
      */
     public LinkedQueueNode<E> lvNext()

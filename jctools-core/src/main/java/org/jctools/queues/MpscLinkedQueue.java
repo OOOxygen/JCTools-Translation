@@ -205,7 +205,8 @@ public class MpscLinkedQueue<E> extends BaseLinkedQueue<E>
             // Q: 为什么可以使用普通赋值模式？
             // A: 这块代码其实相当于对象工厂，下面的原子交换指令可以为这里提供保护。
             final LinkedQueueNode<E> temp = newNode(s.get());
-            tail.soNext(temp);
+            // spNext: xchgProducerNode ensures correct construction
+            tail.spNext(temp);
             tail = temp;
         }
         final LinkedQueueNode<E> oldPNode = xchgProducerNode(tail);

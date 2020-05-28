@@ -543,8 +543,8 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
         }
 
         // 先消费元素，再更新消费者进度（因为生产者会先校验consumerIndex，因此可确保生产者不会覆盖数据）。
-        // 理论上这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
-        soRefElement(buffer, offset, null);
+        // 这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
+        spRefElement(buffer, offset, null);
         soConsumerIndex(cIndex + 1);
         return e;
     }
@@ -627,8 +627,8 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
             return null;
         }
 
-        // 理论上这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
-        soRefElement(buffer, offset, null);
+        // 这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
+        spRefElement(buffer, offset, null);
         soConsumerIndex(cIndex + 1);
         return e;
     }
@@ -669,8 +669,8 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
                 // 在接口说明中，约定了drain的语义为relaxedPoll，因此不尽最大努力获取元素，当前可消费多少就消费多少，不阻塞
                 return i;
             }
-            // 理论上这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
-            soRefElement(buffer, offset, null);
+            // 这里可以使用Plain模式赋值为null，因为生产者一定会在索引可见之后才填充元素，consumerIndex的发布可以保证这里也正确发布。
+            spRefElement(buffer, offset, null);
             soConsumerIndex(index + 1); // ordered store -> atomic and ordered for size()
             // 消费元素 - 根据接口约定，该实现不应该抛出异常，虽然在当前队列实现是安全的，但是抛出异常可能在某些实现先破坏队列的状态。
             c.accept(e);

@@ -124,11 +124,12 @@ public class SpscLinkedQueue<E> extends BaseLinkedQueue<E>
             // A: 这块代码其实相当于对象工厂，下面的oldPNode.soNext(head)可以保证消费者消费时，访问到正确构造的数据。
             // 因为消费者只有在next可见时才会消费数据。
             final LinkedQueueNode<E> temp = newNode(s.get());
-            tail.soNext(temp);
+            // spNext : soProducerNode ensures correct construction
+            tail.spNext(temp);
             tail = temp;
         }
         final LinkedQueueNode<E> oldPNode = lpProducerNode();
-        spProducerNode(tail);
+        soProducerNode(tail);
         // same bubble as offer, and for the same reasons.
         oldPNode.soNext(head);
         return limit;
