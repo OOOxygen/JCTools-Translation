@@ -27,6 +27,9 @@ import static org.jctools.util.Pow2.roundToPowerOfTwo;
  */
 abstract class MpscCompoundQueueL0Pad<E> extends AbstractQueue<E> implements MessagePassingQueue<E>
 {
+    /**
+     * 缓存行填充，避免{@link MpscCompoundQueueColdFields}上的属性产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -52,6 +55,11 @@ abstract class MpscCompoundQueueColdFields<E> extends MpscCompoundQueueL0Pad<E>
     protected final int parallelQueuesMask;
     protected final MpscArrayQueue<E>[] queues;
 
+    /**
+     *
+     * @param capacity         队列容量上限
+     * @param queueParallelism 并行度（子队列数）
+     */
     @SuppressWarnings("unchecked")
     MpscCompoundQueueColdFields(int capacity, int queueParallelism)
     {
@@ -63,6 +71,7 @@ abstract class MpscCompoundQueueColdFields<E> extends MpscCompoundQueueL0Pad<E>
         RangeUtil.checkGreaterThanOrEqual(fullCapacity, parallelQueues, "fullCapacity");
         for (int i = 0; i < parallelQueues; i++)
         {
+            // 容量均摊到子队列
             queues[i] = new MpscArrayQueue<E>(fullCapacity / parallelQueues);
         }
     }
@@ -70,6 +79,9 @@ abstract class MpscCompoundQueueColdFields<E> extends MpscCompoundQueueL0Pad<E>
 
 abstract class MpscCompoundQueueMidPad<E> extends MpscCompoundQueueColdFields<E>
 {
+    /**
+     * 缓存行填充，避免前面属性和{@code consumerQueueIndex}上产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -95,6 +107,9 @@ abstract class MpscCompoundQueueMidPad<E> extends MpscCompoundQueueColdFields<E>
 
 abstract class MpscCompoundQueueConsumerQueueIndex<E> extends MpscCompoundQueueMidPad<E>
 {
+    /**
+     * 消费者当前消费的队列的索引。
+     */
     int consumerQueueIndex;
 
     MpscCompoundQueueConsumerQueueIndex(int capacity, int queueParallelism)
@@ -103,8 +118,20 @@ abstract class MpscCompoundQueueConsumerQueueIndex<E> extends MpscCompoundQueueM
     }
 }
 
+/**
+ * 由多个{@link MpscArrayQueue}构成的复合队列，旨在使用多个{@link MpscArrayQueue}分散生产者，降低其竞争。
+ * <p>
+ * 这个类也是个挺有意思的类，不过实际效果如何不一定比{@link MpscArrayQueue}好，比较看脸（{@link Thread#getId()}），
+ * 如果生产者之间的id是连续的，经过'&'运算后，会落在不同的队列，应该会获得较好的效果，如果id较为分散，则不一定了。
+ * 极限情况下：所有生产者都从同一个队列开始插入。
+ * <p>
+ * 警告：如果任务之间有依赖（比如时序要求），那么慎用该队列。
+ */
 public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
 {
+    /**
+     * 缓存行填充，避免{@code consumerQueueIndex}上产生伪共享
+     */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
     byte b020,b021,b022,b023,b024,b025,b026,b027;// 24b
@@ -132,6 +159,14 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
         super(capacity, queueParallelism);
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * 实现提示：
+     * 1. 根据线程id计算首选队列，并尝试插入。
+     * 2. 如果插入成功则结束，插入失败则尝试插入到其它队列（循环一圈）。
+     * 3. 如果每个队列都插入失败则彻底失败。
+     */
     @Override
     public boolean offer(final E e)
     {
@@ -152,12 +187,18 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
         }
     }
 
+    /**
+     * 实现提示：
+     * 以循环的方式尝试在各个队列使用{@link MpscArrayQueue#failFastOffer(Object)}压入，压入成功则返回，
+     * 如果压入失败，则更新累计状态值，如果一圈下来，所有队列都表示已满，则返回失败，否则继续重试。
+     */
     private boolean slowOffer(MpscArrayQueue<E>[] queues, int parallelQueuesMask, int start, E e)
     {
         final int queueCount = parallelQueuesMask + 1;
         final int end = start + queueCount;
         while (true)
         {
+            // 每次循环开始，重置状态值，这个名字起的不算好（实际是想确定已满队列个数）
             int status = 0;
             for (int i = start; i < end; i++)
             {
@@ -166,15 +207,25 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
                 {
                     return true;
                 }
+                // 注意：如果是CAS失败，返回的是-1，因此status既会增加也会减少
                 status += s;
             }
+
             if (status == queueCount)
             {
+                // status == queueCount 意味着每个队列都返回1，即每个队列都已满
+                // 如果一圈下来，所有队列都返回已满，则队列失败。
                 return false;
             }
         }
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * 实现提示：消费者从当前队列索引开始，尝试从每个队列poll元素，如果poll成功，则更新{@link #consumerQueueIndex}，然后返回元素。
+     * 如果一圈下来都失败了，也更新{@link #consumerQueueIndex}。
+     */
     @Override
     public E poll()
     {
@@ -189,10 +240,17 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
                 break;
             }
         }
+        // 无论成功还是失败，都更新索引，下次消费时仍从该索引开始
         consumerQueueIndex = qIndex;
         return e;
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * 实现提示：消费者从当前队列索引开始，尝试从每个队列peek元素，如果peek成功，则更新{@link #consumerQueueIndex}，然后返回元素。
+     * 如果一圈下来都失败了，也更新{@link #consumerQueueIndex}。
+     */
     @Override
     public E peek()
     {
@@ -207,6 +265,7 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
                 break;
             }
         }
+        // 无论成功还是失败，都更新索引，下次消费时仍从该索引开始
         consumerQueueIndex = qIndex;
         return e;
     }
@@ -246,10 +305,12 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
         final MpscArrayQueue<E>[] queues = this.queues;
         if (queues[start].failFastOffer(e) == 0)
         {
+            // 在第一个队列上插入成功，则直接返回
             return true;
         }
         else
         {
+            // 在第一个队列上已经失败，只需要在其它队列尝试一遍
             // we already offered to first queue, try the rest
             for (int i = start + 1; i < start + parallelQueuesMask + 1; i++)
             {
@@ -258,6 +319,7 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
                     return true;
                 }
             }
+            // 因为是relaxedOffer，因此我们可能以任意的原因失败
             // this is a relaxed offer, we can fail for any reason we like
             return false;
         }
@@ -266,6 +328,7 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
     @Override
     public E relaxedPoll()
     {
+        // 请查看poll的实现说明，这里的区别就是调用的是子队列的relaxedPoll
         int qIndex = consumerQueueIndex & parallelQueuesMask;
         int limit = qIndex + parallelQueues;
         E e = null;
@@ -284,6 +347,7 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
     @Override
     public E relaxedPeek()
     {
+        // 请查看peek的实现说明，这里的区别就是调用的是子队列的relaxedPeek
         int qIndex = consumerQueueIndex & parallelQueuesMask;
         int limit = qIndex + parallelQueues;
         E e = null;
@@ -342,10 +406,12 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
         int filled = queues[start].fill(s, limit);
         if (filled == limit)
         {
+            // 在第一个队列上已经填充了期望的元素，则结束
             return limit;
         }
         else
         {
+            // 在第一个队列上已经失败，只需要在其它队列尝试一遍（填充余下数量的元素）
             // we already offered to first queue, try the rest
             for (int i = start + 1; i < start + parallelQueuesMask + 1; i++)
             {
@@ -355,6 +421,7 @@ public class MpscCompoundQueue<E> extends MpscCompoundQueueConsumerQueueIndex<E>
                     return limit;
                 }
             }
+            // 因为是relaxedOffer，因此我们可能以任意的原因失败
             // this is a relaxed offer, we can fail for any reason we like
             return filled;
         }
