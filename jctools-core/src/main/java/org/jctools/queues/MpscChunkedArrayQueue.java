@@ -79,6 +79,7 @@ public class MpscChunkedArrayQueue<E> extends MpscChunkedArrayQueueColdProducerF
     @Override
     protected long availableInQueue(long pIndex, long cIndex)
     {
+        // 不可以超过最大容量限制
         return maxQueueCapacity - (pIndex - cIndex);
     }
 
@@ -91,12 +92,14 @@ public class MpscChunkedArrayQueue<E> extends MpscChunkedArrayQueueColdProducerF
     @Override
     protected int getNextBufferSize(E[] buffer)
     {
+        // 扩容策略：创建一个相同大小的buffer
         return length(buffer);
     }
 
     @Override
     protected long getCurrentBufferCapacity(long mask)
     {
+        // 由于还可能继续创建下一个数组，因此需要预留JUMP的空间，因此返回mask
         return mask;
     }
 }

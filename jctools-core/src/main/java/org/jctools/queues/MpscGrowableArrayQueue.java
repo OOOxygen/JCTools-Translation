@@ -49,8 +49,10 @@ public class MpscGrowableArrayQueue<E> extends MpscChunkedArrayQueue<E>
     @Override
     protected int getNextBufferSize(E[] buffer)
     {
+        // 最大容量检查
         final long maxSize = maxQueueCapacity / 2;
         RangeUtil.checkLessThanOrEqual(length(buffer), maxSize, "buffer.length");
+        // 注意这里的扩容策略：这是与其他实现不同的地方，这里是2倍扩容，其它地方是创建相同大小的数组
         final int newSize = 2 * (length(buffer) - 1);
         return newSize + 1;
     }
@@ -58,6 +60,8 @@ public class MpscGrowableArrayQueue<E> extends MpscChunkedArrayQueue<E>
     @Override
     protected long getCurrentBufferCapacity(long mask)
     {
+        // 当数组到达最大容量后，因为不会再扩容，因此不再为JUMP预留空间，因此有效容量就是maxCapacity
+        // 在未到达最大容量时，需要为JUMP预留空间，因此有效容量需要会少1个(也就是位移后的mask)
         return (mask + 2 == maxQueueCapacity) ? maxQueueCapacity : mask;
     }
 }

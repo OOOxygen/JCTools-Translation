@@ -62,6 +62,7 @@ abstract class BaseMpscLinkedArrayQueueProducerFields<E> extends BaseMpscLinkedA
      * 注意：真正的索引其实是{@code producerIndex >> 1}，最低位用于表示队列的状态（是否正在调整大小）。
      * 将队列的状态存储在索引中，这样可以避免读取多个字段，以及并发更新问题。
      * PS: {@link java.util.concurrent.ThreadPoolExecutor}也有相似设计。
+     * 我有个想法：最高位存储标记会不会更好？可以减少特殊情况。
      */
     private volatile long producerIndex;
 
@@ -223,8 +224,10 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
     }
 
     /**
-     * 在其它队列实现中，很少有CAS更新producerLimit的，这里我的理解是为了减少对{@code offerSlowPath}的调用，
-     * 因此需要确保producerLimit递增更新，而不会并发更新为一个更小的值。
+     * 在其它队列实现中，很少有CAS更新producerLimit的，因为一般情况下缓存一个旧值并没有太大问题。
+     * Q: 为什么需要CAS更新？
+     * A: 需要保证producerLimit和producerMask和producerBuffer对应，即producerLimit必须落在当前数组上。
+     * 如果可能落在不同的数组上，如果只根据pIndex < producerLimit，我们并不能采取下一步行动。
      */
     final boolean casProducerLimit(long expect, long newValue)
     {
@@ -233,7 +236,7 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
     /**
      * storeOrderedProducerLimit
-     * 在该队列实现中，只有resize的线程调用该方法，即有独占权时可以使用该方法更新，其它线程只有看见最新值时才能进行下一步。
+     * 在该队列实现中，只有resize的线程调用该方法，即有独占权时可以使用该方法更新。
      */
     final void soProducerLimit(long newValue)
     {
@@ -244,7 +247,9 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
 /**
  * 多生产者单消费者模式的基于LinkedArray的队列，不难想到，复杂度主要在生产者竞争扩容。
- * 这里没有进行后向填充，子类需要处理后向填充问题
+ * 这里没有进行后向填充，子类需要处理后向填充问题。
+ * <p>
+ * 该类是一个模板实现，并提供了钩子方法供子类扩展。
  *
  * An MPSC array queue which starts at <i>initialCapacity</i> and grows to <i>maxCapacity</i> in linked chunks
  * of the initial size. The queue grows only when the current buffer is full and elements are not copied on
@@ -554,20 +559,22 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
 
         if (cIndex + bufferCapacity > pIndex)
         {
-            // cIndex + bufferCapacity 为最新的producerLimit
-            // 如果pIndex < producerLimit，则证明尚有可用空间，
+            // 走到这，表示当前数组尚有可用空间，不必扩容
+            // 注意：bufferCapacity一定小于等于队列的最大容量限制
             if (!casProducerLimit(producerLimit, cIndex + bufferCapacity))
             {
+                // CAS失败，有可能是其它生产者进行了扩容（切换了数组），因此必须重试（读取最新的数组重试）
                 // retry from top
                 return RETRY;
             }
             else
             {
+                // CAS成功，则pIndex一定还在当前数组，则可以CAS竞争索引
                 // continue to pIndex CAS
                 return CONTINUE_TO_P_INDEX_CAS;
             }
         }
-        // 到这里表示队列已满，需要判断是否可以扩容
+        // 到这里表示当前数组已满，需要判断是否可以扩容
         // full and cannot grow
         else if (availableInQueue(pIndex, cIndex) <= 0)
         {
@@ -592,7 +599,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     }
 
     /**
-     * 获取队列中可插入的元素的个数
+     * 计算队列中还有多少可用空间
      *
      * @return available elements in queue * 2
      * 由于pIndex和cIndex都是真实索引的二倍，因此返回结果也是可用空间的二倍，方便计算。
@@ -761,8 +768,12 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             // lower bit is indicative of resize, if we see it we spin until it's cleared
             if ((pIndex & 1) == 1)
             {
+                // 有生产者正在进行扩容，此时需要等待其扩容完成
                 continue;
             }
+            // 走到这，证明pIndex是个偶数 -> 真实索引为 pIndex >> 1
+            // mask和buffer可能因为某个生产者扩容导致改变 -> 仅用于CAS成功后的数组访问
+
             // pIndex is even (lower bit is 0) -> actual index is (pIndex >> 1)
 
             // NOTE: mask/buffer may get changed by resizing -> only use for array access after successful CAS.
@@ -772,6 +783,8 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             buffer = this.producerBuffer;
             // a successful CAS ties the ordering, lv(pIndex) -> [mask/buffer] -> cas(pIndex)
 
+            // 我们想要限制可用槽位，但将会设置为'producerLimit'可见的一切？？？
+            // 换句话说：用户的limit值，会被修正为当前producerLimit下可见的limit值，以进行批量声明这些槽位
             // we want 'limit' slots, but will settle for whatever is visible to 'producerLimit'
             long batchIndex = Math.min(producerLimit, pIndex + 2l * limit); //  -> producerLimit >= batchIndex
 
@@ -782,6 +795,8 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 {
                     case CONTINUE_TO_P_INDEX_CAS:
                         // offer slow path verifies only one slot ahead, we cannot rely on indication here
+                        // offerSlowPath返回可以CAS竞争索引，仅仅表示可以竞争当前槽位（单个槽位），而我们这里需要批量竞争索引，因此不能依赖这里的返回值
+                        // 必须重试，直到pIndex < producerLimit
                     case RETRY:
                         continue;
                     case QUEUE_FULL:
@@ -792,6 +807,8 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 }
             }
 
+            // 注意，走到这里的时候：1. 只有pIndex < producerLimit才会走到这里。2. batchIndex <= producerLimit
+            // 尝试批量申请这部分槽位，如果CAS成功，这这部分数据都是可填充的，
             // claim limit slots at once
             if (casProducerIndex(pIndex, batchIndex))
             {
@@ -800,9 +817,12 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             }
         }
 
+        // 批量声明数据成功，这部分槽位可以安全的进行填充
         for (int i = 0; i < claimedSlots; i++)
         {
             final long offset = modifiedCalcCircularRefElementOffset(pIndex + 2l * i, mask);
+            // 这里使用Ordered模式保证安全发布
+            // 谨记Supplier对get方法的约束，不可以抛出异常，不可以返回null，否则队列将被破坏
             soRefElement(buffer, offset, s.get());
         }
         return claimedSlots;
@@ -959,12 +979,19 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             throw oom;
         }
 
+        // 更新当前使用的数组
         producerBuffer = newBuffer;
         final int newMask = (newBufferLength - 2) << 1;
         producerMask = newMask;
 
         final long offsetInOld = modifiedCalcCircularRefElementOffset(pIndex, oldMask);
         final long offsetInNew = modifiedCalcCircularRefElementOffset(pIndex, newMask);
+
+        // 1. 新元素添加到了新数组中，此时尚不可达 - 该步可使用Plain模式存储，在更新生产者索引前不可达
+        // 2. 旧数组链接到新数组，此时新数组也尚不可达 - 该步可使用Plain模式存储，在更新生产者索引前不可达
+        // 3. 更新producerLimit - 此时是没有竞争的，可以确保producerLimit落在当前数组上
+        // 4. 更新生产者索引 - 此时生产者索引对其它生产者和消费者可见，当其它生产者读取到最新索引时，将会跳转到到下一个数组。
+        // 5. 添加JUMP到旧数组，此时JUMP对消费者可见，当消费者读取到JUMP时，知道链接已完成，且下一个元素也完成了存储。
 
         soRefElement(newBuffer, offsetInNew, e == null ? s.get() : e);// element in new array
         soRefElement(oldBuffer, nextArrayOffset(oldMask), newBuffer);// buffer linked
@@ -974,6 +1001,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         final long availableInQueue = availableInQueue(pIndex, cIndex);
         RangeUtil.checkPositive(availableInQueue, "availableInQueue");
 
+        // 索引更新都需要使用Ordered模式，以确保原子存储，此外producerIndex
         // Invalidate racing CASs
         // We never set the limit beyond the bounds of a buffer
         soProducerLimit(pIndex + Math.min(newMask, availableInQueue));
@@ -986,6 +1014,9 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         // make resize visible to consumer
         soRefElement(oldBuffer, offsetInOld, JUMP);
     }
+
+    // 下面这两个方法是相关的，因为扩容策略的不同，导致数组中有效长度不同
+    // 主要由于Growable策略引起的，其扩容策略与其它队列不同，且到达最大容量以后，因为不会再扩容，因此不再为JUMP预留空间。
 
     /**
      * 获取下一个数组(buffer)的大小，返回值需要包括到下一个数组的指针
