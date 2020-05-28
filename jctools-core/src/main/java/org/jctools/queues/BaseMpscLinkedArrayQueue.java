@@ -228,8 +228,11 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
     /**
      * 在其它队列实现中，很少有CAS更新producerLimit的，因为一般情况下缓存一个旧值并没有太大问题。
      * Q: 为什么需要CAS更新？
-     * A: 需要保证producerLimit和producerMask和producerBuffer对应，即producerLimit必须落在当前数组上。
-     * 如果可能落在不同的数组上，如果只根据pIndex < producerLimit，我们并不能采取下一步行动。
+     * A: 需要保证{@link #producerLimit}和producerMask和producerBuffer对应，
+     * 即{@link #producerLimit}应该由当前使用的{@link #producerBuffer}来计算。
+     * ->
+     * 可以确保{@code offerSlowPath}不会覆盖{@code resize}对producerLimit的写入，
+     * 而允许{@code resize}覆盖{@code offerSlowPath}对producerLimit的写入。
      */
     final boolean casProducerLimit(long expect, long newValue)
     {
@@ -437,7 +440,12 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 }
             }
 
-            // pIndex未超过限制（缓存的或最新的限制），尝试竞争索引(+2是因为索引进行了左移)
+            // 注意，走到这里的时候：
+            // 1. pIndex < producerLimit。
+            // 2. pIndex为偶数
+            // 如果有其它线程正在扩容，则CAS必定失败，如果成功更新了producerLimit则会被覆盖
+
+            // +2是因为索引进行了左移
             if (casProducerIndex(pIndex, pIndex + 2))
             {
                 break;
@@ -563,16 +571,23 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         if (cIndex + bufferCapacity > pIndex)
         {
             // 走到这，表示当前数组尚有可用空间，不必扩容
-            // 注意：bufferCapacity一定小于等于队列的最大容量限制
+            // Q: 为什么使用CAS更新？
+            // A: 使用CAS更新，可以确保不会覆盖resize对producerLimit的写入，但是允许了resize覆盖这里对producerLimit的写入。
+
+            // Q: 为什么还区分CAS更新成功失败，不是只要不覆盖resize对producerLimit的写就可以了吗？
+            // A: 理论上确实是都可以返回 CONTINUE_TO_P_INDEX_CAS 的，即都去CAS竞争pIndex，也一定是正确的。
+            // 但是既然我们这里已经使用了CAS，我们可以通过它的结果检测到潜在的冲突，从而降低竞争，
+            // 如果有多个生产者到达这里，在更新producerLimit之后，那么它们将竞争同一个pIndex，
+            // 如果我们只让casProducerLimit成功的生产者去竞争索引，而失败的直接重新开始，那么可以减少在当前pIndex上的竞争。
+
             if (!casProducerLimit(producerLimit, cIndex + bufferCapacity))
             {
-                // CAS失败，有可能是其它生产者进行了扩容（切换了数组），因此必须重试（读取最新的数组重试）
                 // retry from top
                 return RETRY;
             }
             else
             {
-                // CAS成功，则pIndex一定还在当前数组，则可以CAS竞争索引
+                // 注意：如果有其它生产者正在扩容，则这里的producerLimit会被覆盖。
                 // continue to pIndex CAS
                 return CONTINUE_TO_P_INDEX_CAS;
             }
@@ -811,8 +826,13 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 }
             }
 
-            // 注意，走到这里的时候：1. 只有pIndex < producerLimit才会走到这里。2. batchIndex <= producerLimit
-            // 尝试批量申请这部分槽位，如果CAS成功，这这部分数据都是可填充的，
+            // 注意，走到这里的时候：
+            // 1. pIndex < producerLimit
+            // 2. batchIndex <= producerLimit
+            // 3. pIndex为偶数
+
+            // 如果有其它线程正在扩容，则CAS必定失败，如果成功更新了producerLimit则会被覆盖
+            // 尝试批量申请这部分槽位，如果CAS成功，这这部分数据都是可填充的
             // claim limit slots at once
             if (casProducerIndex(pIndex, batchIndex))
             {
@@ -1012,7 +1032,9 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         final long availableInQueue = availableInQueue(pIndex, cIndex);
         RangeUtil.checkPositive(availableInQueue, "availableInQueue");
 
-        // 索引更新都需要使用Ordered模式，以确保原子存储
+        // 索引更新都需要使用Ordered模式，以确保原子存储。
+        // 使竞争无效：这里会覆盖其它线程casProducerLimit的结果。
+        // 如果其它生产者先casProducerLimit成功，那么结果会被覆盖；如果这里先更新，那么其它线程必定cas失败，不会覆盖这里的值。
         // Invalidate racing CASs
         // We never set the limit beyond the bounds of a buffer
         soProducerLimit(pIndex + Math.min(newMask, availableInQueue));
