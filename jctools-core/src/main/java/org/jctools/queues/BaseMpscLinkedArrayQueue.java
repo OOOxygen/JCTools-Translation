@@ -502,6 +502,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         }
 
         // 因为生产者保证了安全发布，因此这里可以直接消费，不必等待生产者索引可见
+        // 这里其实可以使用Plain模式清理元素，因为生产者依赖于消费者的索引，而不是element的可见性
         soRefElement(buffer, offset, null); // release element null
         // 这里使用Ordered模式保证原子存储，以及尽快对生产者可见，以前确保元素清理在这之前完成（避免并发更新同一槽位）
         // 注意位移，因此这里实际是 真实索引+1
