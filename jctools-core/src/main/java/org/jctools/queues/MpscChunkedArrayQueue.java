@@ -36,6 +36,10 @@ abstract class MpscChunkedArrayQueueColdProducerFields<E> extends BaseMpscLinked
 }
 
 /**
+ * 一个容量从<i>initialCapacity</i>并以初始大小的链接块增长到<i>maxCapacity</i>的MPSC队列。
+ * 仅当当前块(chunk)已满时才会扩容，未使用resize和拷贝元素的方法扩容，而是在旧块(当前块)存储一个到新块的链接。
+ * 消费者可以通过该链接跟随生产者。
+ *
  * An MPSC array queue which starts at <i>initialCapacity</i> and grows to <i>maxCapacity</i> in linked chunks
  * of the initial size. The queue grows only when the current chunk is full and elements are not copied on
  * resize, instead a link to the new chunk is stored in the old chunk for the consumer to follow.

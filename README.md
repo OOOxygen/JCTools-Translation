@@ -9,8 +9,10 @@ PS: 译注过程中会尽量保证增量为绿色。
 
 #### 进度
 目前完成常见队列的译注，包括:  
-基于数组的队列： MpscArrayQueue、MpmcArrayQueue、SpscArrayQueue、SpmcArrayQueue  
-基于链表的队里： MpscLinkedQueue、SpscLinkedQueue  
+1. 基于数组的队列： MpscArrayQueue、MpmcArrayQueue、SpscArrayQueue、SpmcArrayQueue  
+2. 基于链表的队列： MpscLinkedQueue、SpscLinkedQueue  
+3. 基于LinkedArray的队列： SpscChunkedArrayQueue、SpscGrowableArrayQueue、SpscUnboundedArrayQueue、
+MpscGrowableArrayQueue、MpscChunkedArrayQueue、MpscUnboundedArrayQueue
 本次翻译（注释）还是比较匆忙的，若有错误或有疑惑可以提出。
 
 #### Bugs

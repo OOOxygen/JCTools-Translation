@@ -20,6 +20,11 @@ import static org.jctools.queues.LinkedArrayQueueUtil.length;
 
 
 /**
+ * 一个容量从<i>initialCapacity</i>并以链接的块增长到<i>maxCapacity</i>的MPSC队列。
+ * 每次都会将连接块容量加倍，直到底层的数组可以完全容纳所有的元素。
+ * 仅当当前块(chunk)已满时才会扩容，未使用resize和拷贝元素的方法扩容，而是在旧块(当前块)存储一个到新块的链接。
+ * 消费者可以通过该链接跟随生产者。
+ *
  * An MPSC array queue which starts at <i>initialCapacity</i> and grows to <i>maxCapacity</i> in linked chunks,
  * doubling theirs size every time until the full blown backing array is used.
  * The queue grows only when the current chunk is full and elements are not copied on

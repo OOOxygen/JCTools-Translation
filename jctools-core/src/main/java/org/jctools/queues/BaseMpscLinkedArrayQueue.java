@@ -194,10 +194,12 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
     /**
      * 在重新读取消费者索引之前，第一个不可用的生产者索引。
      * <p>
-     * Q: 这部分数据需要与{@code producerIndex}分开吗？
+     * Q: 这部分数据需要与{@code producerIndex}分开吗？<br>
      * A: 因为是多生产模式，因此producerIndex上将产生高度竞争，因此其所在的缓存行极易失效，
-     * 将这部分数据与producerIndex分开，我们期望该这部分数据大部分时间位于用于共享（且很少失效）的缓存行中。
+     * 将这部分数据与producerIndex分开，我们期望该这部分数据大部分时间位于用于共享（且很少失效）的缓存行中。<br>
      * PS: 这也隔得太远了，为啥不把消费者的放最上面？
+     * <p>
+     * 关键约束：{@code producerBuffer} {@link #producerMask}必须对应{@link #producerBuffer}。
      */
     private volatile long producerLimit;
     /**
@@ -246,7 +248,7 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
 
 /**
- * 多生产者单消费者模式的基于LinkedArray的队列，不难想到，复杂度主要在生产者竞争扩容。
+ * 基于LinkedArray的多生产者单消费者模式的队列，不难想到，复杂度主要在生产者竞争扩容时产生。
  * 这里没有进行后向填充，子类需要处理后向填充问题。
  * <p>
  * 该类是一个模板实现，并提供了钩子方法供子类扩展。
@@ -599,7 +601,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     }
 
     /**
-     * 计算队列中还有多少可用空间
+     * 计算<b>队列</b>中还有多少可用空间
      *
      * @return available elements in queue * 2
      * 由于pIndex和cIndex都是真实索引的二倍，因此返回结果也是可用空间的二倍，方便计算。
@@ -624,6 +626,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
 
     private static long nextArrayOffset(long mask)
     {
+        // mask + 2 >> 1  => length - 1 即数组最后一个元素
         return modifiedCalcCircularRefElementOffset(mask + 2, Long.MAX_VALUE);
     }
 
@@ -961,6 +964,13 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         }
     }
 
+    /**
+     * 扩容实现
+     *
+     * @param oldMask   当前（旧）数组对应的mask
+     * @param oldBuffer 当前（旧）数组
+     * @param pIndex    当前生产者索引（奇数，最低位为1）
+     */
     private void resize(long oldMask, E[] oldBuffer, long pIndex, E e, Supplier<E> s)
     {
         assert (e != null && s == null) || (e == null || s != null);
@@ -1001,14 +1011,16 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         final long availableInQueue = availableInQueue(pIndex, cIndex);
         RangeUtil.checkPositive(availableInQueue, "availableInQueue");
 
-        // 索引更新都需要使用Ordered模式，以确保原子存储，此外producerIndex
+        // 索引更新都需要使用Ordered模式，以确保原子存储
         // Invalidate racing CASs
         // We never set the limit beyond the bounds of a buffer
         soProducerLimit(pIndex + Math.min(newMask, availableInQueue));
 
+        // producerIndex必须在producerLimit之后更新，可确保其它生产者读取到最新producerIndex时，读取到的producerLimit一定落在最新数组上
         // make resize visible to the other producers
         soProducerIndex(pIndex + 2);
 
+        // 和offer相同，索引已经对外可见，和消费者的期望一致（消费者会处理这种情况）。
         // INDEX visible before ELEMENT, consistent with consumer expectation
 
         // make resize visible to consumer
