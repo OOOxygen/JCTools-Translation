@@ -581,7 +581,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         {
             // 走到这，表示当前数组尚有可用空间，不必扩容
             // Q: 为什么使用CAS更新？
-            // A: 使用CAS更新，可以确保不会覆盖resize对producerLimit的写入，但是允许了resize覆盖这里对producerLimit的写入。
+            // A: 使用CAS更新，可以确保不会覆盖resize对producerLimit的写入，但是允许了resize覆盖这里对producerLimit的写入，详情请查看resize中的注释。
 
             // Q: 为什么还区分CAS更新成功失败，不是只要不覆盖resize对producerLimit的写就可以了吗？
             // A: 理论上确实是都可以返回 CONTINUE_TO_P_INDEX_CAS 的，即都去CAS竞争pIndex，也一定是正确的。
@@ -596,8 +596,6 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             }
             else
             {
-                // 注意：如果有其它生产者正在扩容，则这里的producerLimit会被覆盖。
-                // TODO 现在正在努力的分析，是否会覆盖resize的写入
                 // continue to pIndex CAS
                 return CONTINUE_TO_P_INDEX_CAS;
             }
@@ -1040,11 +1038,22 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         // ASSERT code
         final long cIndex = lvConsumerIndex();
         final long availableInQueue = availableInQueue(pIndex, cIndex);
+        // 注意：该校验很重要，它确保了下面的producerLimit不会被其它线程覆盖
         RangeUtil.checkPositive(availableInQueue, "availableInQueue");
 
         // 索引更新都需要使用Ordered模式，以确保原子存储。
         // 使竞争无效：这里会覆盖其它线程casProducerLimit的结果。
         // 如果其它生产者先casProducerLimit成功，那么结果会被覆盖；如果这里先更新，那么其它线程必定cas失败，不会覆盖这里的值。
+
+        // Q: 为什么这里先更新，其它线程CAS必定失败？
+        // A: 当这里正在扩容时，其它线程无法增加pIndex，因此它们的pIndex一定小于等于这里的pIndex，
+        // 而当其它线程进入offerSlowPath时，其producerLimit一定小于等于其pIndex，也就是说一定小于等于这里的pIndex，
+        // 又由于这里计算的新producerLimit一定大于pIndex，
+        // 因此这里的写入如果对其它线程可见，当其它线程进行CAS更新时，那么内存的值一定不等于它们的期望值，因此必定失败。
+        // 而如果其它线程先进行了CAS更新，这里的后执行，那么一定会被覆盖。
+        // offerSlowPath.producerLimit <= pIndex
+        // resize.producerLimit > pIndex
+
         // Invalidate racing CASs
         // We never set the limit beyond the bounds of a buffer
         soProducerLimit(pIndex + Math.min(newMask, availableInQueue));
