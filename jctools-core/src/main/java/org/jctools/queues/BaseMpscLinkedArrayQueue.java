@@ -199,7 +199,7 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
      * 将这部分数据与producerIndex分开，我们期望该这部分数据大部分时间位于用于共享（且很少失效）的缓存行中。<br>
      * PS: 这也隔得太远了，为啥不把消费者的放最上面？
      * <p>
-     * 关键约束：{@code producerBuffer} {@link #producerMask}必须对应{@link #producerBuffer}。
+     * 关键约束：{@code producerLimit} {@link #producerMask}必须对应{@link #producerBuffer}。
      */
     private volatile long producerLimit;
     /**
@@ -229,7 +229,7 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
      * 在其它队列实现中，很少有CAS更新producerLimit的，因为一般情况下缓存一个旧值并没有太大问题。
      * Q: 为什么需要CAS更新？
      * A: 需要保证{@link #producerLimit}和producerMask和producerBuffer对应，
-     * 即{@link #producerLimit}应该由当前使用的{@link #producerBuffer}来计算。
+     * 即{@link #producerLimit}应该由当前使用的{@link #producerBuffer}来计算(producerLimit不能超过队列限制，也不能超过当前数组限制)。
      * ->
      * 可以确保{@code offerSlowPath}不会覆盖{@code resize}对producerLimit的写入，
      * 而允许{@code resize}覆盖{@code offerSlowPath}对producerLimit的写入。
@@ -255,6 +255,15 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
  * 这里没有进行后向填充，子类需要处理后向填充问题。
  * <p>
  * 该类是一个模板实现，并提供了钩子方法供子类扩展。
+ * <p>
+ * 对于消费者：
+ * 1. 遇见NULL表示队列为空。
+ * 2. 遇见JUMP就跳跃到下一个数组。
+ * 3. 遇见JUMP以外的非NULL值，则表示这是一个普通元素，可直接消费。
+ * <p>
+ * 对于生产者：
+ * 1. 如果pIndex < producerLimit，则CAS竞争pIndex，竞争成功则填充，失败则重试，直到确定队列已满。
+ * 2. producerLimit的更新依赖于consumerIndex。
  *
  * An MPSC array queue which starts at <i>initialCapacity</i> and grows to <i>maxCapacity</i> in linked chunks
  * of the initial size. The queue grows only when the current buffer is full and elements are not copied on
@@ -588,6 +597,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             else
             {
                 // 注意：如果有其它生产者正在扩容，则这里的producerLimit会被覆盖。
+                // TODO 现在正在努力的分析，是否会覆盖resize的写入
                 // continue to pIndex CAS
                 return CONTINUE_TO_P_INDEX_CAS;
             }
