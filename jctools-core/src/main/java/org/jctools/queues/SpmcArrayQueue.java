@@ -22,7 +22,7 @@ abstract class SpmcArrayQueueL1Pad<E> extends ConcurrentCircularArrayQueue<E>
     /**
      * 缓存行填充，避免{@code producerIndex}和超类{@link ConcurrentCircularArrayQueue}的{@code buffer}产生伪共享。
      * <p>
-     * 这里似乎可以少8个字节？因为超类有字段超过8字节，下面的{@code producerIndex}8字节。
+     * 这里似乎可以少8个字节？因为超类有字段超过8字节，下面的{@code producerIndex}8字节也可以充当填充。
      */
     byte b000,b001,b002,b003,b004,b005,b006,b007;//  8b
     byte b010,b011,b012,b013,b014,b015,b016,b017;// 16b
@@ -228,8 +228,10 @@ abstract class SpmcArrayQueueProducerIndexCacheField<E> extends SpmcArrayQueueMi
     }
 
     /**
-     * storeOrderedProducerIndexCache
-     * 因为是多消费者模式，不可以使用Plain模式读写（需要保证读写原子性）
+     * storeVolatileProducerIndexCache
+     * 这里使用了volatile模式写，在JCTools中很少用到，原因如下：
+     * 1. 因为是多消费者模式，不可以使用Plain模式读写（需要保证读写原子性） - 至少需要使用Ordered模式。
+     * 2. 消费者的速度可能很快，volatile更新缓存对其它消费者立即可见，可以避免大量的读取生产者索引 - 这个是个人见解。
      */
     protected final void svProducerIndexCache(long newValue)
     {
@@ -373,7 +375,7 @@ public class SpmcArrayQueue<E> extends SpmcArrayQueueL3Pad<E>
     {
         // 这里使用Plain模式加载元素，因为生产者先填充元素，然后更新索引(Ordered Mode)，
         // 走到这里的时候，索引已经对消费者可见，因此元素必定可见。
-        // 这里使用Ordered模式清除元素，可确保null对生产者可见，生产者会等待变为null之后才填充元素。
+        // 这里使用Ordered模式清除元素，可确保null尽快对生产者可见，生产者会等待变为null之后才填充元素。
 
         final long offset = calcCircularRefElementOffset(index, mask);
         // load plain, element happens before it's index becomes visible

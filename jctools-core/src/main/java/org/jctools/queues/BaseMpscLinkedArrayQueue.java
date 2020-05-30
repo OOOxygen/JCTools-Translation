@@ -87,7 +87,7 @@ abstract class BaseMpscLinkedArrayQueueProducerFields<E> extends BaseMpscLinkedA
     }
 
     /**
-     * 生产者竞争索引，成功那个可以填充对应的槽位
+     * 生产者竞争索引，成功那个可以填充对应的槽位（或resize）
      */
     final boolean casProducerIndex(long expect, long newValue)
     {
@@ -149,7 +149,7 @@ abstract class BaseMpscLinkedArrayQueueConsumerFields<E> extends BaseMpscLinkedA
 
     /**
      * loadPlainConsumerIndex
-     * 消费者使用该方法读取即可
+     * 消费者使用该方法读取即可，因为只有消费者线程修改该索引
      */
     final long lpConsumerIndex()
     {
@@ -241,7 +241,7 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
     /**
      * storeOrderedProducerLimit
-     * 在该队列实现中，只有resize的线程调用该方法，即有独占权时可以使用该方法更新。
+     * 在该队列实现中，只有resize的线程调用该方法，它一定会覆盖其它线程调用{@link #casProducerLimit(long, long)}的结果
      */
     final void soProducerLimit(long newValue)
     {
@@ -251,10 +251,19 @@ abstract class BaseMpscLinkedArrayQueueColdProducerFields<E> extends BaseMpscLin
 
 
 /**
- * 基于LinkedArray的多生产者单消费者模式的队列，不难想到，复杂度主要在生产者竞争扩容时产生。
- * 这里没有进行后向填充，子类需要处理后向填充问题。
+ * Q: 关于{@code LinkedArrayQueue}?
+ * A: 队列由多个环形数组构成，在分配数组空间时，会多分配一个元素的空间，用于存储到下一个数组的指针（固定为数组的最后一个元素）。
+ * 如果当前数组已满（谨记环形数组），则分配一个新的数组空间，并使用额外申请的那个槽位指向新的数组。
  * <p>
- * 该类是一个模板实现，并提供了钩子方法供子类扩展。
+ * 使用环形数组由诸多好出:
+ * 1. 可以反复利用分配的空间，只有在必要时才申请新的空间。
+ * 2. 不必纠结索引转换问题，可以使用全局索引（pIndex,cIndex），而不必每个数组一个索引。
+ * 3. 由于使用mask和index计算真实槽位，因此额外分配的槽位是不会被计算到的，更加简单。
+ * <p>
+ * PS: 这是很优秀的设计，应该学习。
+ * <p>
+ * 不难想到，复杂度主要在生产者竞争扩容时产生，该类是一个模板实现，并提供了钩子方法供子类扩展。
+ * 这里没有进行后向填充，子类需要处理后向填充问题。
  * <p>
  * 对于消费者：
  * 1. 遇见NULL表示队列为空。
@@ -280,7 +289,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
      */
     private static final Object JUMP = new Object();
     /**
-     * 标记当前数组已被完全消费 - 用于区分队列已空还是当前数组已断开连接，这是引入{@link WeakIterator}导致的。
+     * 标记当前数组已被完全消费 - 表示当前数组已断开连接（可以被回收），这是引入{@link WeakIterator}导致的。
      */
     private static final Object BUFFER_CONSUMED = new Object();
 
@@ -289,7 +298,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
      */
     private static final int CONTINUE_TO_P_INDEX_CAS = 0;
     /**
-     * 简单重试(continue)
+     * 从循环顶部重试
      */
     private static final int RETRY = 1;
     /**
@@ -311,8 +320,10 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         RangeUtil.checkGreaterThanOrEqual(initialCapacity, 2, "initialCapacity");
 
         int p2capacity = Pow2.roundToPowerOfTwo(initialCapacity);
+        // mask需要和index一样左移1位
         // leave lower bit of mask clear
         long mask = (p2capacity - 1) << 1;
+        // 额外的一个空间（最后一个槽位）用于存储下一个数组的指针
         // need extra element to point at next array
         E[] buffer = allocateRefArray(p2capacity + 1);
         producerBuffer = buffer;
@@ -332,6 +343,9 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         // 提示：因为索引都是偶数，因此不能使用IndexedQueueSizeUtil (其实生产者索引可能为奇数，严格的说是索引都是位移后的，因此不能直接使用工具类计算)
         // 由于当前线程在读取producerIndex和consumerIndex期间可能被中断或被重新调度，因此我们需要保证size在有效范围。
         // 在当前方法计算size的时候，并发的poll/offer事件是可能的，因此在读取producerIndex之前读取consumerIndex。
+
+        // 顺序很重要：
+        // 先加载消费者索引，再加载生产者索引，可避免消费者索引超过生产者索引。
 
         // NOTE: because indices are on even numbers we cannot use the size util.
 
@@ -371,8 +385,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     public boolean isEmpty()
     {
         // 顺序很重要！
-        // 先读取consumerIndex再读取producerIndex，允许了生产者在加载consumerIndex之后增加procuderIndex，
-        // 这样可以保证该方法的估算值是保守的。
+        // 先读取consumerIndex再读取producerIndex，允许了生产者在加载consumerIndex之后增加procuderIndex，这样可以保证该方法的估算值是保守的。
         // 注意，对于MPMC，我们无法做任何事情来使其成为精确的方法。
 
         // 注意：我们的生产者索引是可能为奇数的，在resize的时候！
@@ -423,7 +436,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             buffer = this.producerBuffer;
 
             // 一个成功的CAS建立了特定时序：lv(pIndex) - [mask/buffer] -> cas(pIndex)
-            // 该优化背后的假设是队列几乎总是空的或接近空的 - 如果队列几乎总是满的，那么这里性能就很差
+            // 该优化背后的假设是队列几乎总是空的或接近空的 - 如果队列几乎总是满的，那么这里性能就很差（大量的CAS）
 
             // a successful CAS ties the ordering, lv(pIndex) - [mask/buffer] -> cas(pIndex)
 
@@ -434,7 +447,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 switch (result)
                 {
                     case CONTINUE_TO_P_INDEX_CAS:
-                        // 竞争更新producerLimit成功，尚有可用空间，当前索引可以进行填充
+                        // 竞争更新producerLimit成功，尚有可用空间，且可能还在当前数组上，可以尝试竞争pIndex，如果成功则可以填充。
                         // 这个break有点迷惑性，跳出的是switch，而不是跳出循环
                         break;
                     case RETRY:
@@ -452,7 +465,6 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             // 注意，走到这里的时候：
             // 1. pIndex < producerLimit。
             // 2. pIndex为偶数
-            // 如果有其它线程正在扩容，则CAS必定失败，如果成功更新了producerLimit则会被覆盖
 
             // +2是因为索引进行了左移
             if (casProducerIndex(pIndex, pIndex + 2))
@@ -460,7 +472,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 break;
             }
         }
-        // 此时所以已经对其它线程可见，因此消费者必须处理索引可见，但元素尚未填充或尚不可见的情况
+        // 此时索引已经对其它线程可见，因此消费者必须处理索引可见但元素尚未填充或尚不可见的情况
         // 使用Ordered模式尽快的对消费者可见，因为消费者依赖于element的可见性，以减少对producerIndex的依赖 - CAS已经保证了正确的构造。
 
         // INDEX visible before ELEMENT
@@ -519,7 +531,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         }
 
         // 因为生产者保证了安全发布，因此这里可以直接消费，不必等待生产者索引可见
-        // 这里其实可以使用Plain模式清理元素，因为生产者依赖于消费者的索引，而不是element的可见性
+        // 这里其实可以使用Plain模式清理元素，因为生产者依赖于消费者的索引，而不是element的值
         soRefElement(buffer, offset, null); // release element null
         // 这里使用Ordered模式保证原子存储，以及尽快对生产者可见，以前确保元素清理在这之前完成（避免并发更新同一槽位）
         // 注意位移，因此这里实际是 真实索引+1
@@ -582,6 +594,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
             // 走到这，表示当前数组尚有可用空间，不必扩容
             // Q: 为什么使用CAS更新？
             // A: 使用CAS更新，可以确保不会覆盖resize对producerLimit的写入，但是允许了resize覆盖这里对producerLimit的写入，详情请查看resize中的注释。
+            // 提示：进入该方法时 producerLimit <= pIndex
 
             // Q: 为什么还区分CAS更新成功失败，不是只要不覆盖resize对producerLimit的写就可以了吗？
             // A: 理论上确实是都可以返回 CONTINUE_TO_P_INDEX_CAS 的，即都去CAS竞争pIndex，也一定是正确的。
@@ -604,7 +617,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
         // full and cannot grow
         else if (availableInQueue(pIndex, cIndex) <= 0)
         {
-            // 没有可用空间，队列已满，且不可以扩容
+            // 数组已满，且不可以扩容（队列级别的已满）
             // offer should return false;
             return QUEUE_FULL;
         }
@@ -625,7 +638,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
     }
 
     /**
-     * 计算<b>队列</b>中还有多少可用空间
+     * 计算<b>队列</b>中还可以插入多少元素(不包括JUMP标记和到下一个数组的指针)
      *
      * @return available elements in queue * 2
      * 由于pIndex和cIndex都是真实索引的二倍，因此返回结果也是可用空间的二倍，方便计算。
@@ -799,7 +812,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 continue;
             }
             // 走到这，证明pIndex是个偶数 -> 真实索引为 pIndex >> 1
-            // mask和buffer可能因为某个生产者扩容导致改变 -> 仅用于CAS成功后的数组访问
+            // mask和buffer可能因为某个生产者扩容导致改变 -> 仅用于CAS成功后的数组访问 - 仅当CAS成功时可确保数据是期望的
 
             // pIndex is even (lower bit is 0) -> actual index is (pIndex >> 1)
 
@@ -822,7 +835,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
                 {
                     case CONTINUE_TO_P_INDEX_CAS:
                         // offer slow path verifies only one slot ahead, we cannot rely on indication here
-                        // offerSlowPath返回可以CAS竞争索引，仅仅表示可以竞争当前槽位（单个槽位），而我们这里需要批量竞争索引，因此不能依赖这里的返回值
+                        // offerSlowPath返回可以CAS竞争索引，但仅仅表示可以竞争当前槽位（单个槽位），而我们这里需要批量竞争索引，因此不能依赖这里的返回值
                         // 必须重试，直到pIndex < producerLimit
                     case RETRY:
                         continue;
@@ -1043,7 +1056,7 @@ abstract class BaseMpscLinkedArrayQueue<E> extends BaseMpscLinkedArrayQueueColdP
 
         // 索引更新都需要使用Ordered模式，以确保原子存储。
         // 使竞争无效：这里会覆盖其它线程casProducerLimit的结果。
-        // 如果其它生产者先casProducerLimit成功，那么结果会被覆盖；如果这里先更新，那么其它线程必定cas失败，不会覆盖这里的值。
+        // 如果其它生产者先casProducerLimit成功，那么其结果会被这里覆盖；如果这里先更新，那么其它线程必定cas失败，不会覆盖这里的值。
 
         // Q: 为什么这里先更新，其它线程CAS必定失败？
         // A: 当这里正在扩容时，其它线程无法增加pIndex，因此它们的pIndex一定小于等于这里的pIndex，

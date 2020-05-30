@@ -19,10 +19,9 @@ abstract class ConcurrentSequencedCircularArrayQueue<E> extends ConcurrentCircul
 {
     /**
      * Q: 这个数组是干嘛的，和{@link #buffer}有什么区别？<br>
-     * A: 用于描述{@link #buffer}每个槽位的状态（是否已被填充或消费）。<br>
-     * <p>
-     * Q: 有生产者索引和消费者索引的情况下为何还要这个？
-     * A: 避免生产者和消费者读取彼此的索引，提高读性能 - 读取彼此的索引容易造成缓存行miss。
+     * A: 用于描述{@link #buffer}每个槽位的状态（是否已被填充或消费）。生产者与消费者优先通过（或只通过）sequenceBuffer进行交互，
+     * 避免读取彼此的索引，从而避免大量的缓存行miss，从而提高读性能。
+     * PS: 这是为了提高性能付出的空间代价。
      */
     protected final long[] sequenceBuffer;
 

@@ -76,10 +76,7 @@ abstract class BaseLinkedQueueProducerNodeRef<E> extends BaseLinkedQueuePad0<E>
 
     /**
      * storePlainProducerNode
-     * 当为单生产者模式时，生产者使用该方法更新节点的引用，然后由赋值语句后的Ordered模式的节点链接操作保证对其它线程的可见性。
-     * Q: 为什么是安全的？
-     * A: 即使发布了对象的引用，也不会存在对对象内容的访问，因为消费者必须等待链接完成，才能访问节点数据。
-     * 在{@code LinkedQueueNode.next}上具备happens-before关系。
+     * 该方法无法保证安全发布，因此在后续的修改中，除构造方法外，都使用了{@link #soProducerNode(LinkedQueueNode)}
      */
     final void spProducerNode(LinkedQueueNode<E> newValue)
     {
@@ -88,7 +85,7 @@ abstract class BaseLinkedQueueProducerNodeRef<E> extends BaseLinkedQueuePad0<E>
 
     /**
      * storeOrderedProducerNode
-     * 理论上讲，该方法不是必要的，见{@link #spProducerNode(LinkedQueueNode)}。
+     * 可以实现安全发布，确保newValue构造完成，以避免非消费者访问节点时看见未构造完成的对象。
      */
     final void soProducerNode(LinkedQueueNode<E> newValue)
     {
@@ -98,7 +95,7 @@ abstract class BaseLinkedQueueProducerNodeRef<E> extends BaseLinkedQueuePad0<E>
     /**
      * loadVolatileProducerNode
      * 多生产者模式下，必须使用该方法读取。
-     * 单生产者模式下，当确定是生产者线程时使用该方法读取。
+     * 单生产者模式下，当不确定是生产者线程时使用该方法读取。
      */
     final LinkedQueueNode<E> lvProducerNode()
     {
@@ -219,7 +216,7 @@ abstract class BaseLinkedQueuePad2<E> extends BaseLinkedQueueConsumerNodeRef<E>
  * 前面一系列基类通过缓存行填充消除了{@code producerNode}和{@code consumerNode}上产生的伪共享。
  * 从该类开始可以进行一些基本逻辑的实现了。。。。
  * <p>
- * 该类为并发队列的基本数据结构实现。为了方便起见，还引入了常见的单消费者方法，因为目前尚无实现MC(多消费者)的计划。
+ * 该类为基于链表的并发队列的基本数据结构实现。为了方便起见，还引入了常见的单消费者方法，因为目前尚无实现MC(多消费者)的计划。
  * <p>
  * 我认为的合理的（队列/对象）状态约束：
  * <ol>
@@ -283,10 +280,10 @@ abstract class BaseLinkedQueue<E> extends BaseLinkedQueuePad2<E>
         // 因为如果生产者节点是一个比消费者节点更旧的值，则消费者节点可能已经越过了该生产者节点（已消费该节点），从而导致基于快照概念的size无效。
 
         // 解释一下：
-        // 简单的size计算可以从头结点开始遍历，一直到next为null。但是在并发环境下，size本就是一个估算值，因此我们可以降低精确性，从而减少开销。
+        // 简单的size计算可以从头结点开始遍历，一直到next为null或self。但是在并发环境下，size本就是一个估算值，因此我们可以降低精确性，从而减少开销。
         // Q: 那么怎么做呢？
         // A: 我们改变遍历结束条件，我们将当前的头结点和尾节点存为快照，从快照的头结点遍历到快照的尾节点，我们返回这个快照对应的size即可。
-        // 那么在存储快照的时候就必须保证 尾节点不可以比头结点更旧，否则尾节点可能是无效值。这需要满足两方面的保证:
+        // 那么在存储快照的时候就必须保证 尾节点（生产者）不可以比头结点（消费者）更旧，否则尾节点可能是无效值。这需要满足两方面的保证:
         // 1. 子类实现必须保证消费时consumerNode不会越过producerNode（类文档中的状态约束）
         // 2. 两个读操作之间不可以重排序 - volatile读不会与后面的读写操作重排序，在J9中也可以在两者间插入acquireFence
 

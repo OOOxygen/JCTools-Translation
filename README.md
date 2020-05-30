@@ -1,4 +1,4 @@
-### JCTools 源码译注  
+### JCTools 源码译注（源码剖析）
 使用原仓库的master分支进行译注，[原仓库传送门](https://github.com/JCTools/JCTools)。  
 初步扫了一遍，并发Map的复杂度已经超出了我的理解能力，因此该项目只会翻译(注释)Queue的实现，Channel也可能会翻译。  
 

@@ -7,7 +7,7 @@ import static org.jctools.util.UnsafeRefArrayAccess.REF_ELEMENT_SHIFT;
 
 /**
  * Q: 什么是{@code LinkedArrayQueue}？
- * A: 由多个数组构成的队列，且每个数组的最后一个元素用于存储到下一个数组的指针。
+ * A: 由多个数组构成的队列，每个数组会额外申请一个空间，用于存储到下一个数组的指针。
  *
  * This is used for method substitution in the LinkedArray classes code generation.
  */

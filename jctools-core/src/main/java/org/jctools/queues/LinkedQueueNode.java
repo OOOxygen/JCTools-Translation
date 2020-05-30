@@ -20,6 +20,9 @@ final class LinkedQueueNode<E>
 {
     private final static long NEXT_OFFSET = fieldOffset(LinkedQueueNode.class,"next");
 
+    /**
+     * 如果为null，表示已消费，或被删除
+     */
     private E value;
     /**
      * 下一个节点的指针
@@ -61,6 +64,7 @@ final class LinkedQueueNode<E>
 
     /**
      * storePlainValue - 普通方式对value赋值
+     * （生产者通过接下来的带有内存屏障的存储指令保证安全发布）
      */
     public void spValue(E newValue)
     {

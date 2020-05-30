@@ -56,6 +56,7 @@ abstract class MpmcArrayQueueProducerIndexField<E> extends MpmcArrayQueueL1Pad<E
     /**
      * 生产者索引。
      * 这是一个预更新值，看{@link #casProducerIndex(long, long)}就能知道。生产者们先竞争更新索引，再填充元素。
+     * （多生产者模式下必定需要先竞争索引）
      */
     private volatile long producerIndex;
 
@@ -118,7 +119,8 @@ abstract class MpmcArrayQueueConsumerIndexField<E> extends MpmcArrayQueueL2Pad<E
 
     /**
      * 消费者索引
-     * 这也是一个预更新值，看{@link #casProducerIndex(long, long)}就可以知道。消费者们先竞争更新索引，更新成功的线程可以消费该索引对应的元素。
+     * 这也是一个预更新值，看{@link #casConsumerIndex(long, long)} 就可以知道。消费者们先竞争更新索引，更新成功的线程可以消费该索引对应的元素。
+     * (多消费者模式必须如此)
      */
     private volatile long consumerIndex;
 
@@ -187,6 +189,8 @@ abstract class MpmcArrayQueueL3Pad<E> extends MpmcArrayQueueConsumerIndexField<E
  * <li>容量为2的幂：实际元素buffer（和sequence buffer）的容量是2的最接近的幂，大于或等于请求的容量。</li>
  * </ol>
  * <p>
+ * 在该实现中，生产者与消费者通过{@link #sequenceBuffer}交互，会尽量减少读取彼此的索引，以提高性能。
+ * <p>
  *
  * A Multi-Producer-Multi-Consumer queue based on a {@link org.jctools.queues.ConcurrentCircularArrayQueue}. This
  * implies that any and all threads may call the offer/poll/peek methods and correctness is maintained. <br>
@@ -215,7 +219,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
     /**
      * 来了，来了，它又来了！
      * Q: 观望步数（不太好直译）？这是个什么东西？
-     * A: 这里是设计和{@link SpscArrayQueue}还不太一样，这里是用于减少潜在的冲突的。
+     * A: 用于观望n步以后的槽位元素是否已被填充或已被消费，从而避免读取彼此的索引。
      */
     private final int lookAheadStep;
 
@@ -255,7 +259,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             if (seq < pIndex)
             {
                 // 根据seq推断该槽位尚未被消费，队列已满，由于消费者先更新的索引，后进行消费，最后更新seq，
-                // 因此需要读取最新的消费者索引查看是否有消费者正在消费该槽位，如果有则需要等待，以满足Queue对offer的语义要求。
+                // 因此需要读取最新的消费者索引查看是否有消费者正在消费该槽位，如果有则需要等待，以满足Queue对offer的语义要求（当且仅当队列已满时才能返回false）。
                 // Extra check required to ensure [Queue.offer == false iff queue is full]
                 if (pIndex - capacity >= cIndex && // test against cached cIndex
                     pIndex - capacity >= (cIndex = lvConsumerIndex())) // test against latest cIndex
@@ -275,7 +279,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             !casProducerIndex(pIndex, pIndex + 1)); // failed to increment
 
         // Q: 为什么必须等待seq为期望值？
-        // A: 只有当seq为期望值时，可保证元素为null，且在seq上不会发生并发修改！（如果不等待seq为期望值，则在seq上可能产生并发修改）
+        // A: 只有当seq为期望值时，可保证元素为null，且在seq上不会发生并发修改！
 
         // 注意生产者的操作时序：先CAS更新生产者索引，再发布元素，最后更新seq - 消费必须等待seq可见，否则seq上可能产生并发修改。
         // seq是完成生产者与消费者通信的关键
@@ -344,7 +348,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
             !casConsumerIndex(cIndex, cIndex + 1)); // failed the CAS
 
         // Q: 为什么必须等待seq为期望值？
-        // A: 只有当seq为期望值时，可保证元素可见，且在seq上不会发生并发修改！（如果不等待seq为期望值，则在seq上可能产生并发修改）
+        // A: 只有当seq为期望值时，可保证元素可见，且在seq上不会发生并发修改！
 
         // 注意消费者的操作时序：先CAS更新consumerIndex，再删除元素，最后再更新seq - 生产者也必须等待seq可见，否则seq上可能产生并发修改。
         // seq是完成生产者与消费者通信的关键

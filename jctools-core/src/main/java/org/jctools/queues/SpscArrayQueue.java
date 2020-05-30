@@ -286,8 +286,9 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
         final long offset = calcCircularRefElementOffset(producerIndex, mask);
 
         // 注意这里的时序问题，先发布发元素，再发布的索引。
-        // 提示：在Fast Flow模型下，消费者会在element可见时就消费，而不会等待生产者索引更新，因此这里不可以使用Plain模式存储。
+        // 提示：在Fast Flow模型下，消费者会在element可见时就消费，而不会等待生产者索引更新，因此这里不可以使用Plain模式存储，需要保证安全发布，以及较快的可见性。
         soRefElement(buffer, offset, e);
+        // Ordered模式，需要保证原子存储，对于size并无帮助（这个原注释是错误的）。
         soProducerIndex(producerIndex + 1); // ordered store -> atomic and ordered for size()
         return true;
     }
@@ -308,7 +309,7 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
         else
         {
             // 这段数据不都为null，此时有两种选择：1.读取消费者索引 2. 缩小观望范围
-            // 这里是采用的单步观望，而不是读取消费者索引
+            // 这里是采用的单步观望，而不是读取消费者索引(因为消费者也是先清除元素，后更新索引)
             final long offset = calcCircularRefElementOffset(producerIndex, mask);
             if (null != lvRefElement(buffer, offset))
             {
@@ -341,7 +342,6 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
         }
         // 注意：由于生产者是观望element是否null，以进行下一步的，因此这里使用Ordered模式可以使其更快感知到。
         // 注意：由于未等待生产者索引可见，因此这里可能导致消费者索引超过生产者索引。
-        // 这里理论上可以使用Plain模式清理元素
         soRefElement(buffer, offset, null);
         soConsumerIndex(consumerIndex + 1); // ordered store -> atomic and ordered for size()
         return e;
@@ -461,14 +461,16 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
             else
             {
                 // 这段数据不都为null，此时有两种选择：1.读取消费者索引 2. 缩小观望范围
-                // 这里是采用的单步观望，而不是读取消费者索引
+                // 这里是采用的单步观望，而不是读取消费者索引（因为消费者也是先清除元素，后更新索引）
                 final long offset = calcCircularRefElementOffset(index, mask);
                 if (null != lvRefElement(buffer, offset))
                 {
                     return i;
                 }
-                // 与offer保持相同的时序
+                // 与offer保持相同的时序，先发布元素，再更新索引
+                // Ordered模式确保正确的构造和安全发布
                 soRefElement(buffer, offset, s.get());
+                // Ordered模式，需要保证原子存储，对于size并无帮助（这个原注释是错误的）。
                 soProducerIndex(index + 1); // ordered store -> atomic and ordered for size()
             }
 
@@ -505,8 +507,9 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
                 }
                 consumerIndex++;
                 counter = 0;
-                // 与poll保持相同的时序
+                // 与poll保持相同的时序，新清理元素，再更新索引，因为生产者依赖于element为null，而不是索引
                 soRefElement(buffer, offset, null);
+                // Ordered模式，需要保证原子存储，对于size并无帮助（这个原注释是错误的）。
                 soConsumerIndex(consumerIndex); // ordered store -> atomic and ordered for size()
                 c.accept(e);
             }
@@ -555,8 +558,10 @@ public class SpscArrayQueue<E> extends SpscArrayQueueL3Pad<E>
                 }
                 producerIndex++;
                 counter = 0;
-                // 与poll保持相同的时序
+                // 与offer保持相同的时序，先发布元素，再更新索引
+                // Ordered模式确保正确的构造和安全发布
                 soRefElement(buffer, offset, s.get());
+                // Ordered模式，需要保证原子存储，对于size并无帮助（这个原注释是错误的）。
                 soProducerIndex(producerIndex); // ordered store -> atomic and ordered for size()
             }
         }

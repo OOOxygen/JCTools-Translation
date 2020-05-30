@@ -137,6 +137,7 @@ abstract class MpscArrayQueueProducerLimitField<E> extends MpscArrayQueueMidPad<
      * Q: 该值为什么进行缓存行填充，为什么与producerIndex分离？
      * A: 因为是多生产模式，因此producerIndex上将产生高度竞争，因此其所在的缓存行极易失效，
      * 将该值与producerIndex分开，我们期望该值大部分时间位于用于共享（且很少失效）的缓存行中。
+     * PS: 该值的更新频率远低于producerIndex。
      */
     // First unavailable index the producer may claim up to before rereading the consumer index
     private volatile long producerLimit;
@@ -393,7 +394,7 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
             {
                 // 生产者索引大于等于缓存的上限，表示根据缓存值认为队列已满。
                 // 此时，分两种情况：1. 队列真的满了。 2.缓存过期了。
-                // 因此需要读取最新的消费者索引，计算新的上限，判断队列是否是真的满了
+                // 因此需要读取最新的消费者索引，计算新的上限，判断队列是否是真的满了（以满足Queue对offer的语义要求）
                 final long cIndex = lvConsumerIndex();
                 producerLimit = cIndex + mask + 1;
 
@@ -424,6 +425,7 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
         // CAS 竞争成功，可以进行填充
         // 提示：新的生产者索引值先于数组中的元素对其它线程可见。如果依赖于索引的可见性执行poll，我们将需要处理元素可能不可见的情况。
 
+        // 前面的CAS已经保证了对象的正确构造（安全发布），这里使用Ordered模式是保证尽快的可见性（volatile是立即的可见性）。
         // Won CAS, move on to storing
         final long offset = calcCircularRefElementOffset(pIndex, mask);
         soRefElement(buffer, offset, e);
@@ -477,6 +479,7 @@ public class MpscArrayQueue<E> extends MpscArrayQueueL3Pad<E>
         // 提示：新的生产者索引值先于数组中的元素对其它线程可见。如果依赖于索引的可见性执行poll，我们将需要处理元素可能不可见的情况。
         // 0 表示成功
 
+        // 使用Ordered模式实现安全发布，其它线程读取到该对于引用时，可确保是构造完成的对象
         // Won CAS, move on to storing
         final long offset = calcCircularRefElementOffset(pIndex, mask);
         soRefElement(buffer, offset, e);

@@ -220,7 +220,9 @@ abstract class BaseSpscLinkedArrayQueue<E> extends BaseSpscLinkedArrayQueueProdu
 {
 
     /**
-     * 跳点 - 它表示该索引对应的元素在下一个数组中，当前数组已满或已空。
+     * 跳点标记，表示当前索引对应的元素在下一个数组。
+     * 对于生产者而言，表示resize已完成，大家需要到下一个数组竞争索引和填充元素。
+     * 对于消费者而言，表示当前数组已消费完成，需要跳转到下一个数组进行消费。
      */
     private static final Object JUMP = new Object();
 
