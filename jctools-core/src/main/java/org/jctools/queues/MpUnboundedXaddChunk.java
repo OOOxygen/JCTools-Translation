@@ -12,6 +12,8 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
  * 和{@link LinkedQueueNode}不同，{@link MpUnboundedXaddChunk}是有大小和先后关系的，即{@link #index}。
  * 和{@link ConcurrentCircularArrayQueue}不同，{@link MpUnboundedXaddChunk}并非是直接在buffer上循环，
  * 而是索引超出当前chunk则切换到下一个chunk。
+ * <p>
+ * 这是一个双向链表，生产者关注前驱节点{@link #prev}，消费者关注后继节点{@link #next}。
  */
 @InternalAPI
 class MpUnboundedXaddChunk<R,E>
@@ -38,6 +40,7 @@ class MpUnboundedXaddChunk<R,E>
     MpUnboundedXaddChunk(long index, R prev, int size, boolean pooled)
     {
         buffer = allocateRefArray(size);
+        // 这里的soPred似乎是不必的，可以使用spPre赋值，因为接下来必定伴随着安全发布过程，生产者必定会安全发布该对象
         // next is null
         soPrev(prev);
         spIndex(index);

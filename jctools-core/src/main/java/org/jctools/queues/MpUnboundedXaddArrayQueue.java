@@ -114,7 +114,7 @@ abstract class MpUnboundedXaddArrayQueueProducerChunk<R extends MpUnboundedXaddC
      */
     private volatile R producerChunk;
     /**
-     * 生产者当前填充的块的索引（编号），用于扩容时使用（CAS抢占扩容权）。
+     * 最快的生产者当前填充的块的索引（编号），每一个块都有一个编号，消费者通过该值验证{@link #producerChunk}的有效性。
      * 和{@link LinkedQueueNode}不同，{@link MpUnboundedXaddChunk}是有大小和先后关系的，即{@link MpUnboundedXaddChunk#lvNext()}。
      * 因此在CAS竞争更新{@link #producerChunk}头结点时，需要额外的标记。
      */
@@ -196,7 +196,7 @@ abstract class MpUnboundedXaddArrayQueueConsumerFields<R extends MpUnboundedXadd
         fieldOffset(MpUnboundedXaddArrayQueueConsumerFields.class, "consumerChunk");
 
     /**
-     * 消费者当前消费的块的索引（编号），每一个块都有一个编号，消费者通过该值验证{@link #consumerChunk}的有效性。
+     * 最快的消费者当前消费的块的索引（编号），每一个块都有一个编号，消费者通过该值验证{@link #consumerChunk}的有效性。
      * 因为这是两个字段，因此无法原子更新，其它线程可能读取到不对应的属性。
      */
     private volatile long consumerIndex;
@@ -292,13 +292,13 @@ abstract class MpUnboundedXaddArrayQueuePad5<R extends MpUnboundedXaddChunk<R,E>
 }
 
 /**
- * Q: 同样是无界队列，为什么该类的吞吐量远高于{@link MpscUnboundedArrayQueue}?
- * A: 虽然{@link MpscUnboundedArrayQueue}也是无界队列，但它是伪无界队列，仍然考虑了消费者进度，因此产生了许多额外的竞争。
- * 而这里的实现更像{@link MpscLinkedQueue}，只需要处理生产者之间的竞争，不再考虑消费者进度，
- * 因而能大大提高吞吐量，其关键就在于{@link #getAndIncrementProducerIndex()}。
+ * Q: 同样是无界队列，为什么该类的吞吐量远高于{@link MpscUnboundedArrayQueue}
+ * A: 虽然{@link MpscUnboundedArrayQueue}也是无界队列，但它是伪无界队列，仍然考虑了消费者进度(节省空间)，因此产生了许多额外的竞争。
+ * 而这里的实现更像{@link MpscLinkedQueue}，只需要处理生产者之间的竞争，不再考虑消费者进度，空间换时间，因而能大大提高吞吐量。
+ * <p>
  * 此外，这里的{@link MpUnboundedXaddChunk}并不是简单的当做环形数组用的，而是在多个chunk之间循环（动态个数的chunk之间循环），
  * 把多个chunk构成了一个大的循环数组，先根据pIndex/cIndex计算使用的chunk的索引（编号），再根据index计算落在该chunk的哪个槽位。
- * 有点像一致性hash，增加chunk和删除chunk不会影响当前的计算。
+ * 让我想起一致性hash，增加chunk和删除chunk不会影响当前的计算。
  * <p>
  * PS：最好当做{@link MpscLinkedQueue}的变种理解该类，把每一个Node换成了Chunk。
  *
@@ -399,7 +399,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
 
     /**
      * Q: 这个方法是干嘛的？
-     * A: 举个栗子，生产者申请到一个pIndex，我们假设为1，根据运算呢，它应该落在0号chunk上，但是因为是多生产者模式，
+     * A: 举个栗子，假设一个chunk的大小为8192，当前生产者申请到一个pIndex，我们假设为1，根据运算呢，它应该落在0号chunk上，但是因为是多生产者模式，
      * 因此可能另一个生产者的pIndex已经到8193了，即另一个生产者已经开始填充2号chunk了（好比你用ie浏览器，你才刷新第一个界面，别人已经刷第二个界面了），
      * 那么当前生产者读取到的chunk的index可能是0，也可能是1，如果是0，则直接填充；如果是1，则不能填充，需要调整（前后滚动）。
      * <p>
@@ -416,7 +416,13 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         final R initialChunk,
         final long requiredChunkIndex)
     {
+
+        // Q: 有没有可能向前跳呢？
+        // A: 可能！不过在appendNextChunks中。
+
+        // 当前检查的chunk，需要和producerChunk进行检查（比较索引大小）
         R currentChunk = initialChunk;
+        // 后跳步数 - 当生产者速度较快时，不同生产者可能使用不同的chunk，因此可能看见进度最快的那个生产者的chunk，因此需要后跳
         long jumpBackward;
         while (true)
         {
@@ -426,16 +432,21 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             }
             final long currentChunkIndex = currentChunk.lvIndex();
             assert currentChunkIndex != NOT_USED;
+
             // if the required chunk index is less than the current chunk index then we need to walk the linked list of
             // chunks back to the required index
             jumpBackward = currentChunkIndex - requiredChunkIndex;
             if (jumpBackward >= 0)
             {
+                // 走到这，表示我等待的chunk已经被发布了，那么生产者就可以在该节点上进行填充了
                 break;
             }
+
+            // 走到这，表示当前的chunk仍然小于我期望的chunk，则当前线程可能需要尝试创建chunk并进行链接
             // try validate against the last producer chunk index
             if (lvProducerChunkIndex() == currentChunkIndex)
             {
+                // 走到这，表示当前chunk是最新的chunk，但是还未满足需求，那么需要在它后面插入指定数量的chunk
                 currentChunk = appendNextChunks(currentChunk, currentChunkIndex, -jumpBackward);
             }
             else
@@ -443,6 +454,8 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
                 currentChunk = null;
             }
         }
+
+        // 因为生产者的速度差异，因此可能多跳
         for (long i = 0; i < jumpBackward; i++)
         {
             // prev cannot be null, because the consumer cannot null it without consuming the element for which we are
@@ -454,6 +467,14 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         return currentChunk;
     }
 
+    /**
+     * Q: 该方法是干嘛的？
+     * A: 和MpscLinkedQueue不同，LinkedQueueNode之间是没有顺序的，因此生产者可以以任意顺序发布Node（头节点），
+     * 但是这里的Chunk是有编号的，Chunk不能随意拼接，必须保证Chunk之间是有序的，那怎么办呢？
+     * 这里的解决方案如下：
+     * 生产者等待{@link #lvProducerChunkIndex()}为currentChunkIndex，然后再尝试更新，即始终等待上一个编号的chunk发布以后，当前线程再进行下一步，这样整个流程就是串行的了。
+     * 举个例子：如果我想发布2号chunk，那么必须等待1号chunk发布，而想发布3号chunk的线程必须等待2号chunk发布。
+     */
     private R appendNextChunks(
         R currentChunk,
         long currentChunkIndex,
@@ -463,8 +484,10 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         // prevent other concurrent attempts on appendNextChunk
         if (!casProducerChunkIndex(currentChunkIndex, ROTATION))
         {
+            // CAS失败，表示有其它生产者正在尝试创建下一个chunk，因此当前线程需要等待其创建完成
             return null;
         }
+        // 走到这，表示当前线程已获得更新producerChunk的权力，是与其它生产者互斥的。
         /* LOCKED FOR APPEND */
         {
             // it is valid for the currentChunk to be consumed while appending is in flight, but it's not valid for the
@@ -473,6 +496,10 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
 
             for (long i = 1; i <= chunksToAppend; i++)
             {
+                // 这里是双向列表
+                // 对其它生产者而言：新的chunk一旦发布，就可以找到它的前驱节点。
+                // 对于消费者而言：同MpscLinkedQueue，先发布新的chunk，再使其可达（再链接next）。
+
                 R newChunk = newOrPooledChunk(currentChunk, currentChunkIndex + i);
                 soProducerChunk(newChunk);
                 //link the next chunk only when finished
@@ -495,6 +522,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             // single-writer: prevChunk::index == nextChunkIndex is protecting it
             assert newChunk.lvIndex() < prevChunk.lvIndex();
             newChunk.soPrev(prevChunk);
+            // 这里不可以使用Plain模式写入，因为可能还有消费者正在使用该chunk（多消费者模式下），因此至少需要Ordered模式
             // index set is releasing prev, allowing other pending offers to continue
             newChunk.soIndex(nextChunkIndex);
         }
