@@ -12,14 +12,16 @@ PS: 译注过程中会尽量保证增量为绿色。
 1. 基于数组的队列： MpscArrayQueue、MpmcArrayQueue、SpscArrayQueue、SpmcArrayQueue  
 2. 基于链表的队列： MpscLinkedQueue、SpscLinkedQueue  
 3. 基于**LinkedArray**的队列（手动点赞）： SpscChunkedArrayQueue、SpscGrowableArrayQueue、SpscUnboundedArrayQueue、
-MpscGrowableArrayQueue、MpscChunkedArrayQueue、**MpscUnboundedArrayQueue（赞）**  
-4. 其它类型队列：MpscCompoundQueue
+MpscGrowableArrayQueue、MpscChunkedArrayQueue、MpscUnboundedArrayQueue  
+4. MpUnboundedXaddArrayQueue（手动点赞）：
+5. 其它类型队列：MpscCompoundQueue
 
 PS: 本次翻译（注释）还是比较匆忙的，若有错误或有疑惑可以提出。
 
 #### 仔细阅读文档，遵守接口和实现类的约束
 如果不是消费者或生产者，则看队列的状态可能是不满足状态约束的（比如生产者进度和消费者进度之间的约束），因此不能充当生产者或消费者时，慎用队列中的方法。
 （如果站在消费者或生产者的角度都能看见队列的状态不满足状态约束，那么必定有bug）
+
 
 #### Bugs
 就目前阅读的源码而言，有以下bug：

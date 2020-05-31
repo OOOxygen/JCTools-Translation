@@ -19,6 +19,10 @@ import java.util.Arrays;
 
 import static org.jctools.util.UnsafeLongArrayAccess.*;
 
+/**
+ * 如果说每一个Chunk其实都是一个{@link ConcurrentCircularArrayQueue} + {@link LinkedQueueNode}的组合，
+ * 那么每一个{@link MpmcUnboundedXaddChunk}都是一个{@link ConcurrentSequencedCircularArrayQueue} + {@link LinkedQueueNode}的组合。
+ */
 @InternalAPI
 final class MpmcUnboundedXaddChunk<E> extends MpUnboundedXaddChunk<MpmcUnboundedXaddChunk<E>, E>
 {

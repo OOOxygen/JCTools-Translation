@@ -60,6 +60,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
         final long pIndex = getAndIncrementProducerIndex();
 
+        // pIndex落在chunk上的那个槽 - chunk也是一个环形数组
         final int piChunkOffset = (int) (pIndex & chunkMask);
         final long piChunkIndex = pIndex >> chunkShift;
 

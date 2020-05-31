@@ -6,6 +6,13 @@ import static org.jctools.util.UnsafeAccess.UNSAFE;
 import static org.jctools.util.UnsafeAccess.fieldOffset;
 import static org.jctools.util.UnsafeRefArrayAccess.*;
 
+/**
+ * 每一个Chunk其实都是一个{@link ConcurrentCircularArrayQueue} + {@link LinkedQueueNode}的组合。
+ * <p>
+ * 和{@link LinkedQueueNode}不同，{@link MpUnboundedXaddChunk}是有大小和先后关系的，即{@link #index}。
+ * 和{@link ConcurrentCircularArrayQueue}不同，{@link MpUnboundedXaddChunk}并非是直接在buffer上循环，
+ * 而是索引超出当前chunk则切换到下一个chunk。
+ */
 @InternalAPI
 class MpUnboundedXaddChunk<R,E>
 {
@@ -15,6 +22,13 @@ class MpUnboundedXaddChunk<R,E>
     private static final long NEXT_OFFSET = fieldOffset(MpUnboundedXaddChunk.class, "next");
     private static final long INDEX_OFFSET = fieldOffset(MpUnboundedXaddChunk.class, "index");
 
+    /**
+     * 是否是缓存池中的chunk。
+     * <p>
+     * Q: 为什么只有初始化的那几个块的pooled标记是true，后期创建的chunk都是false？
+     * A: 可以减少阻塞，如果不这样的话，生产者在填充前都必须调用{@link #spinForElement(int, boolean)}以确保该槽位可以填充，
+     * 这会增加许多开销，而如果我们只对确定的chunk上调用自旋等待方法，则可以提高性能。
+     */
     private final boolean pooled;
     private final E[] buffer;
 
