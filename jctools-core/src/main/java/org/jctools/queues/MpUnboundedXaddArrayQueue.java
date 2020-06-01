@@ -544,8 +544,8 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             // 由于是从池中取出的chunk，因此它的index应该小于我们正在使用的chunk
 
             // Q: 为什么可以使用Plain模式设置prev？
-            // A: 首先，可能仍有消费者在prev上消费，但一定不会有生产者在prev上。prev对
-            // 接下来会安全发布chunk，当前chunk对于生产者而言尚不可达。
+            // A: 首先，可能仍有消费者在prev上消费，但一定不会有生产者在prev上，当前chunk对于生产者而言尚不可达。
+            // 接下来会安全发布chunk，这之后生产者才可达。
 
             // single-writer: prevChunk::index == nextChunkIndex is protecting it
             assert newChunk.lvIndex() < prevChunk.lvIndex();

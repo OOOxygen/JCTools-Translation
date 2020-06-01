@@ -14,8 +14,6 @@
 package org.jctools.queues;
 
 
-import java.util.concurrent.locks.LockSupport;
-
 /**
  * 该类的实现有点像{@link MpmcArrayQueue}和{@link MpscLinkedQueue}的结合体。
  * <p>
@@ -70,6 +68,9 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         MpmcUnboundedXaddChunk<E> pChunk = lvProducerChunk();
         if (pChunk.lvIndex() != piChunkIndex)
         {
+            // 期望的chunkIndex和当前的chunk不同，
+            // 表示可能需要创建新的chunk，或有其它生产者创建了新的chunk，而当前线程需要后跳到前面的chunk。
+
             // Other producers may have advanced the producer chunk as we claimed a slot in a prev chunk, or we may have
             // now stepped into a brand new chunk which needs appending.
             pChunk = producerChunkForIndex(pChunk, piChunkIndex);
@@ -79,14 +80,15 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
         if (isPooled)
         {
+            // 如果缓存池中的chunk，由于消费者可能提前归还chunk（尚未完全消费），因此必须等待该槽位的消费者完成消费
             // wait any previous consumer to finish its job
             pChunk.spinForElement(piChunkOffset, true);
         }
         pChunk.soElement(piChunkOffset, e);
         if (isPooled)
         {
-            // 注意：对于缓存池中的chunk，先发布元素，再发布chunk编号
-            // （这个和disruptor的多生产者模式的availableBuffer就很像了）
+            // 注意：对于缓存池中的chunk，先发布元素，再发布sequence（chunk编号）
+            // 因此消费者必须等待sequence变为期望值之后才可以消费，sequence是生产者与消费者之间交互的关键 - 同MpmcArrayQueue。
             pChunk.soSequence(piChunkOffset, piChunkIndex);
         }
         return true;
@@ -109,6 +111,10 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         while (true)
         {
             isFirstElementOfNewChunk = false;
+
+            // 无论谁先加载都会导致不一致的情况，因此必须校验。
+            // chunk与index同步，并且在cas更新index之后安全的变更，因为我们提前验证了它与index指示的ciChunkIndex匹配。
+
             cIndex = this.lvConsumerIndex();
             // chunk is in sync with the index, and is safe to mutate after CAS of index (because we pre-verify it
             // matched the indicate ciChunkIndex)
@@ -120,11 +126,19 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
             final long ccChunkIndex = cChunk.lvIndex();
             if (ciChunkOffset == 0 && cIndex != 0) {
+                // 走到这，表示首次（或重新）进入该块，可能需要切换当前消费的chunk
                 if (ciChunkIndex - ccChunkIndex != 1)
                 {
+                    // 走到这表示有其它消费已经更新了chunk
                     continue;
                 }
                 isFirstElementOfNewChunk = true;
+
+                // 走到这里，表示当前线程需要在队列不为空的情况下，尝试切换chunk
+                // next已经被其它消费者线程修改，但是：
+                // 如果next为null，我们无法确定是其它消费者已清理cChunk到next的链接，还是队列为空，因此必须检查队列是否为空，并尝试cas
+                // 如果next不为null，那么就需要CAS竞争索引，CAS成功的消费者负责切换chunk
+
                 next = cChunk.lvNext();
                 // next could have been modified by another racing consumer, but:
                 // - if null: it still needs to check q empty + casConsumerIndex
@@ -139,6 +153,8 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                     }
                     // we will go ahead with the CAS and have the winning consumer spin for the next buffer
                 }
+
+                // 到这里，表示队列不为空，或next不为null，需要CAS竞争更新索引，更新索引成功的消费者负责切换chunk
                 // not empty: can attempt the cas (and transition to next chunk if successful)
                 if (casConsumerIndex(cIndex, cIndex + 1))
                 {
@@ -146,11 +162,14 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 }
                 continue;
             }
+
             if (ccChunkIndex > ciChunkIndex)
             {
+                // chunk的index大于当前cIndex落在的chunk，在加载cIndex后，其它线程开始切换chunk，因而可能发生，从而产生一个旧视图。
                 //stale view of the world
                 continue;
             }
+
             // mid chunk elements
             assert !isFirstElementOfNewChunk && ccChunkIndex <= ciChunkIndex;
             pooled = cChunk.isPooled();
@@ -158,6 +177,15 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             {
                 if (pooled)
                 {
+                    // sequence cIndex索引对应槽位的状态值（是否已填充，已消费）
+                    // sequence == ciChunkIndex 表示该槽位已经被填充（填充之后赋值为chunkIndex），可以被消费（此时竞争更新生产者索引）
+                    // sequence > ciChunkIndex  表示已经被消费，且被下一环的生产者填充了，此时需要重试
+                    // sequence < ciChunkIndex  表示队列可能为空，或生产者正在填充，或已填充但sequence尚不可见，此时需要验证队列是否为空
+
+                    // 池化的chunk需要比空检查更强的保证，以防止生产者在重用chunk时出现过时的视图。
+                    // 在该（过时）视图中，一个消费者已获取该槽但尚未将其空出来（element不为null），而生产者尚未将其设置为新值 - 怎么看不懂了呢？？？
+                    // 解释下：由于重用chunk，因此速度快的消费者可能追上消费慢的消费者！如果不校验sequence，速度快的消费者可能重复消费。
+
                     // Pooled chunks need a stronger guarantee than just element null checking in case of a stale view
                     // on a reused entry where a racing consumer has grabbed the slot but not yet null-ed it out and a
                     // producer has not yet set it to the new value.
@@ -235,6 +263,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             next = cChunk.lvNext();
         }
 
+        // 我们可以简单的自旋等待生产者，因为我们是为唯一负责旋转消费的buffer并使用next的线程 - 该方法是互斥的，只有一个线程能进入。
         // we can freely spin awaiting producer, because we are the only one in charge to
         // rotate the consumer buffer and use next
         final E e = next.spinForElement(0, false);
@@ -242,9 +271,12 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         final boolean pooled = next.isPooled();
         if (pooled)
         {
+            // 这里必须保持和poll相同的语义保证：必须等待sequence为期望值时才可以消费。
             next.spinForSequence(0, expectedChunkIndex);
         }
 
+        // next - 使用Ordered模式，因为生产者依赖于element为null，而不是sequence，因此需要保证尽快的可见性。
+        // 注意：这里和MpmcArrayQueue不同，这里消费者并不需要更新sequence
         next.soElement(0, null);
         moveToNextConsumerChunk(cChunk, next);
         return e;
@@ -313,7 +345,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         final boolean firstElementOfNewChunk = ciChunkOffset == 0 && cIndex != 0;
         if (firstElementOfNewChunk)
         {
-            // 走到这，表示首次（或重新）进入该块，可能需要
+            // 走到这，表示首次（或重新）进入该块，可能需要切换当前消费的chunk
             final long expectedChunkIndex = ciChunkIndex - 1;
             final MpmcUnboundedXaddChunk<E> next;
             final long ccChunkIndex = cChunk.lvIndex();

@@ -78,8 +78,8 @@ public class MpscUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         MpscUnboundedXaddChunk<E> pChunk = lvProducerChunk();
         if (pChunk.lvIndex() != piChunkIndex)
         {
-            // 期望的chunkIndex和当前的chunk不同，那么表示可能需要创建新的chunk，或有其它生产者正在创建或已创建新的chunk
-            // 我们需要找到特定索引的chunk，这可能会创建新的chunk，或后跳到前面的chunk
+            // 期望的chunkIndex和当前的chunk不同，
+            // 表示可能需要创建新的chunk，或有其它生产者创建了新的chunk，而当前线程需要后跳到前面的chunk。
 
             // Other producers may have advanced the producer chunk as we claimed a slot in a prev chunk, or we may have
             // now stepped into a brand new chunk which needs appending.
@@ -419,8 +419,8 @@ public class MpscUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
             if (pChunk == null || pChunk.lvIndex() != chunkIndex)
             {
-                // 期望的chunkIndex和当前的chunk不同，那么表示可能需要创建新的chunk，或有其它生产者正在创建或已创建新的chunk
-                // 我们需要找到特定索引的chunk，这可能会创建新的chunk，或后跳到前面的chun
+                // 期望的chunkIndex和当前的chunk不同，
+                // 表示可能需要创建新的chunk，或有其它生产者创建了新的chunk，而当前线程需要后跳到前面的chunk。
                 pChunk = producerChunkForIndex(pChunk, chunkIndex);
             }
 

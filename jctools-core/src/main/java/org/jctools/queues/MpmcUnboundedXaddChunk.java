@@ -30,13 +30,15 @@ final class MpmcUnboundedXaddChunk<E> extends MpUnboundedXaddChunk<MpmcUnbounded
      * Q: 这个sequence是什么？是不是和{@link ConcurrentSequencedCircularArrayQueue#sequenceBuffer}一样？
      * A: 不一样，这里的sequence存储的是chunkIndex，即每个槽位的元素是否属于该chunk。
      * 对于生产者而言，只要槽位对于的元素为null，就可以填充，填充后将对于的sequence设置为index。
-     * 对于消费者而言，只有当sequence等于index时才可以消费。
+     * 对于消费者而言，只有当sequence等于index时才可以消费，确保该槽位的数据对应于消费者的索引。
      * <p>
      * 注意：只有缓冲池中的chunk是通过sequence交互的，注意看构造方法。
      * <p>
      * Q: 那为什么只有缓冲池中的chunk使用sequence呢？
      * A: 如果不是缓冲池中的chunk，根据element是否为null即可做出判断，而如果是缓冲池中的chunk，由于消费者可能提前归还chunk，
-     * 因此又回归到{@link MpmcArrayQueue}的解决方案，通过sequence避免读取彼此的索引。
+     * 因此又回归到{@link MpmcArrayQueue}的解决方案，通过sequence保证该槽位的数据对应于消费者的索引。
+     * <p>
+     * 这里生产者在填充元素之后，sequence中存储的是chunk的index，这个和disruptor的多生产者模式的availableBuffer就很像了（标记这个数据属于第几环）。
      */
     private final long[] sequence;
 

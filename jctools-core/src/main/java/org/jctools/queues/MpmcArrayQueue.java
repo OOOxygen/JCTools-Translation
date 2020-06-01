@@ -313,7 +313,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
         // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
-        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
+        // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充。
 
         long cIndex;
         long seq;
