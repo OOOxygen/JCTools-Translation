@@ -14,8 +14,11 @@
 package org.jctools.queues;
 
 
+import java.util.concurrent.locks.LockSupport;
 
 /**
+ * 该类的实现有点像{@link MpmcArrayQueue}和{@link MpscLinkedQueue}的结合体。
+ * <p>
  * An MPMC array queue which grows unbounded in linked chunks.<br>
  * Differently from {@link MpmcArrayQueue} it is designed to provide a better scaling when more
  * producers are concurrently offering.<br>
@@ -60,7 +63,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
         final long pIndex = getAndIncrementProducerIndex();
 
-        // pIndex落在chunk上的那个槽 - chunk也是一个环形数组
+        // 分别为：pIndex应该落在小填充的chunk上的槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
         final int piChunkOffset = (int) (pIndex & chunkMask);
         final long piChunkIndex = pIndex >> chunkShift;
 
@@ -82,6 +85,8 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         pChunk.soElement(piChunkOffset, e);
         if (isPooled)
         {
+            // 注意：对于缓存池中的chunk，先发布元素，再发布chunk编号
+            // （这个和disruptor的多生产者模式的availableBuffer就很像了）
             pChunk.soSequence(piChunkOffset, piChunkIndex);
         }
         return true;
@@ -109,6 +114,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             // matched the indicate ciChunkIndex)
             cChunk = this.lvConsumerChunk();
 
+            // 分别为：cIndex落在要消费的chunk的第几个槽，cIndex应该消费哪个索引的chunk（哪个编号的chunk）
             ciChunkOffset = (int) (cIndex & chunkMask);
             ciChunkIndex = cIndex >> chunkShift;
 
@@ -212,15 +218,23 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         return e;
     }
 
+    /**
+     * Q: 这里是如何实现互斥的？
+     * A: 与生产者类似，这里只允许CAS竞争cIndex成功的那个线程切换消费的chunk，其它线程必须等待chunk切换完成。
+     * 在这期间，其它消费者无法在这期间增加cIndex。
+     */
     private E linkNextConsumerChunkAndPoll(
         MpmcUnboundedXaddChunk<E> cChunk,
         MpmcUnboundedXaddChunk<E> next,
         long expectedChunkIndex)
     {
+        // 传入的next参数可能为null。
+        // 走到这，表示队列一定不为空，但此时next可能尚不可达，因此需要自旋直到next可见（看见生产者最新的chunk）。
         while (next == null)
         {
             next = cChunk.lvNext();
         }
+
         // we can freely spin awaiting producer, because we are the only one in charge to
         // rotate the consumer buffer and use next
         final E e = next.spinForElement(0, false);
@@ -291,12 +305,15 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         final long cIndex = this.lvConsumerIndex();
         final MpmcUnboundedXaddChunk<E> cChunk = this.lvConsumerChunk();
 
+        // 分别为：cIndex落在要消费的chunk的第几个槽，cIndex应该消费哪个索引的chunk（哪个编号的chunk）
         final int ciChunkOffset = (int) (cIndex & chunkMask);
         final long ciChunkIndex = cIndex >> chunkShift;
 
+        // 消费者是否是首次进入该chunk （除去第一个块）
         final boolean firstElementOfNewChunk = ciChunkOffset == 0 && cIndex != 0;
         if (firstElementOfNewChunk)
         {
+            // 走到这，表示首次（或重新）进入该块，可能需要
             final long expectedChunkIndex = ciChunkIndex - 1;
             final MpmcUnboundedXaddChunk<E> next;
             final long ccChunkIndex = cChunk.lvIndex();
@@ -321,6 +338,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                     return null;
                 }
             }
+            // 走到这里，表示下一个元素已经被填充，此时需要竞争CAS索引，竞争成功的才可以消费对应的元素
             if (!casConsumerIndex(cIndex, cIndex + 1))
             {
                 return null;
@@ -341,17 +359,21 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             E e = null;
             if (pooled)
             {
+                // 如果chunk是缓冲池中的对象，那么生产者和消费者通过sequence交互
                 final long sequence = cChunk.lvSequence(ciChunkOffset);
                 if (sequence != ciChunkIndex)
                 {
+                    // sequence尚不等
                     return null;
                 }
             }
             else
             {
+                //
                 final long ccChunkIndex = cChunk.lvIndex();
                 if (ccChunkIndex != ciChunkIndex || (e = cChunk.lvElement(ciChunkOffset)) == null)
                 {
+                    // 不是当前消费的chunk，且下一个chunk
                     return null;
                 }
             }

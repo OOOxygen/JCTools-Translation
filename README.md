@@ -12,8 +12,8 @@ PS: 译注过程中会尽量保证增量为绿色。
 1. 基于数组的队列： MpscArrayQueue、MpmcArrayQueue、SpscArrayQueue、SpmcArrayQueue  
 2. 基于链表的队列： MpscLinkedQueue、SpscLinkedQueue  
 3. 基于**LinkedArray**的队列（手动点赞）： SpscChunkedArrayQueue、SpscGrowableArrayQueue、SpscUnboundedArrayQueue、
-MpscGrowableArrayQueue、MpscChunkedArrayQueue、MpscUnboundedArrayQueue  
-4. MpUnboundedXaddArrayQueue（手动点赞）：
+MpscGrowableArrayQueue、MpscChunkedArrayQueue、**MpscUnboundedArrayQueue（赞）**  
+4. XaddQueue（手动点赞）： **MpscUnboundedXaddArrayQueue(赞)**
 5. 其它类型队列：MpscCompoundQueue
 
 PS: 本次翻译（注释）还是比较匆忙的，若有错误或有疑惑可以提出。

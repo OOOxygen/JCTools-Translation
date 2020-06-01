@@ -13,6 +13,10 @@ import static org.jctools.util.UnsafeRefArrayAccess.*;
  * 和{@link ConcurrentCircularArrayQueue}不同，{@link MpUnboundedXaddChunk}并非是直接在buffer上循环，
  * 而是索引超出当前chunk则切换到下一个chunk。
  * <p>
+ * 与{@link ConcurrentCircularArrayQueue}不同，这里的chunk的循环策略有很大不同，
+ * 在{@link ConcurrentCircularArrayQueue}中，必须等待buffer已满的时候才切换到下一个buffer，因此可能从任意位置跳出循环。
+ * 在该chunk中，总是从首元素进入，从尾元素切换到下一个chunk，因此有着不同的生产者和消费者索引计算策略。
+ * <p>
  * 这是一个双向链表，生产者关注前驱节点{@link #prev}，消费者关注后继节点{@link #next}。
  */
 @InternalAPI
@@ -34,13 +38,22 @@ class MpUnboundedXaddChunk<R,E>
     private final boolean pooled;
     private final E[] buffer;
 
+    /**
+     * 生产者依赖于该字段 - 对于生产者而言，一旦看见新的chunk，就可以找到它前面的chunk
+     */
     private volatile R prev;
+    /**
+     * 该chunk的索引（编号）- 其实我觉得称之为编号更好，不然太多索引概念集中以后容易造成混乱。
+     */
     private volatile long index;
+    /**
+     * 消费者依赖于该字段 - 对于消费者而言，会看见新的chunk，但是可能暂时不可达
+     */
     private volatile R next;
     MpUnboundedXaddChunk(long index, R prev, int size, boolean pooled)
     {
         buffer = allocateRefArray(size);
-        // 这里的soPred似乎是不必的，可以使用spPre赋值，因为接下来必定伴随着安全发布过程，生产者必定会安全发布该对象
+        // 这里的soPrev似乎是不必的，可以使用spPrev赋值，因为接下来必定伴随着安全发布过程，生产者必定会安全发布该对象
         // next is null
         soPrev(prev);
         spIndex(index);
@@ -84,6 +97,9 @@ class MpUnboundedXaddChunk<R,E>
 
     final void soPrev(R value)
     {
+        // 这里和方法名不匹配啊，应该是putOrderedObject
+        // 不过逻辑上是可以使用putObject的，所以不知道是命名错误还是实现错误
+        // 作者已更新为spPrev
         UNSAFE.putObject(this, PREV_OFFSET, value);
     }
 
@@ -97,6 +113,10 @@ class MpUnboundedXaddChunk<R,E>
         return lvRefElement(buffer, calcRefElementOffset(index));
     }
 
+    /**
+     * 自旋等待指定槽位上的元素为null或非null。
+     * 当chunk是缓冲池中的chunk时，生产者需要确保不会覆盖未消费的元素，而消费者需要确保生产者已填充才可以消费。
+     */
     final E spinForElement(int index, boolean isNull)
     {
         E[] buffer = this.buffer;

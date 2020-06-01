@@ -43,6 +43,7 @@ abstract class MpUnboundedXaddArrayQueueProducerFields<E> extends MpUnboundedXad
 
     /**
      * 生产者索引。
+     * 生产者先根据index计算当前应该填充的chunk的索引（编号），也根据index计算落在该chunk的哪个槽位，非常巧的设计。
      * 这仍然是一个预更新值，因为是多生产者模型。
      */
     private volatile long producerIndex;
@@ -109,14 +110,15 @@ abstract class MpUnboundedXaddArrayQueueProducerChunk<R extends MpUnboundedXaddC
 
     /**
      * 最快的生产者当前填充的块，这其实是{@link MpscLinkedQueue}中的{@code producerNode}。
-     * 注意：并非所有的生产者都在该块上，很可能有生产者还在填充旧的块。
-     * 注意：这里没有producerLimit，这是一个很大的优化，它使得可以不再考虑消费者的进度，从而减少竞争，大幅提高性能（吞吐量）。
+     * 注意：并非所有的生产者都在该块上，很可能有生产者还在填充旧的块，其它生产者通过prev获取前面的chunk。
+     * 注意：这里没有producerLimit，这是一个很大的优化，它使得可以不再考虑消费者的进度（池化的chunk还是有考虑），从而减少竞争，大幅提高性能（吞吐量）。
      */
     private volatile R producerChunk;
     /**
      * 最快的生产者当前填充的块的索引（编号），每一个块都有一个编号，消费者通过该值验证{@link #producerChunk}的有效性。
      * 和{@link LinkedQueueNode}不同，{@link MpUnboundedXaddChunk}是有大小和先后关系的，即{@link MpUnboundedXaddChunk#lvNext()}。
      * 因此在CAS竞争更新{@link #producerChunk}头结点时，需要额外的标记。
+     * 所以：这其实是个锁标记。
      */
     private volatile long producerChunkIndex;
 
@@ -196,8 +198,8 @@ abstract class MpUnboundedXaddArrayQueueConsumerFields<R extends MpUnboundedXadd
         fieldOffset(MpUnboundedXaddArrayQueueConsumerFields.class, "consumerChunk");
 
     /**
-     * 最快的消费者当前消费的块的索引（编号），每一个块都有一个编号，消费者通过该值验证{@link #consumerChunk}的有效性。
-     * 因为这是两个字段，因此无法原子更新，其它线程可能读取到不对应的属性。
+     * 消费者索引。
+     * 消费者先根据index计算当前应该消费的chunk的索引（编号），也根据index计算落在该chunk的哪个槽位。
      */
     private volatile long consumerIndex;
     /**
@@ -323,7 +325,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
      */
     final int chunkMask;
     /**
-     * chunk的size左边0个数
+     * chunk的size对应的二进制表示中右边有几个0，举个栗子：1024为2^10，其右边有10个0
      * Q: 这个是干嘛的？
      * A: 除法运算优化，通过 {@code index >> chunkShift} 代替除法，计算当前使用的chunk的索引（编号）。
      * 强调：chunk并不是简单当做循环缓冲区使用的，而是先根据index计算当前使用的chunk，再根据index计算落在chunk上的哪个槽位。
@@ -365,7 +367,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         this.chunkShift = Integer.numberOfTrailingZeros(chunkSize);
         freeChunksPool = new SpscArrayQueue<R>(maxPooledChunks);
 
-        // Q: 为什么初始化chunkIndex的所有为0？
+        // Q: 为什么初始化chunkIndex的索引为0？
         // A: 看过类文档的话应该知道，因为chunkIndex是由pIndex/cIndex / chunkSize计算的，初始pIndex/cIndex为0，因此chunkIndex自然为0。
 
         final R first = newChunk(0, null, chunkSize, maxPooledChunks > 0);
@@ -400,7 +402,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
     /**
      * Q: 这个方法是干嘛的？
      * A: 举个栗子，假设一个chunk的大小为8192，当前生产者申请到一个pIndex，我们假设为1，根据运算呢，它应该落在0号chunk上，但是因为是多生产者模式，
-     * 因此可能另一个生产者的pIndex已经到8193了，即另一个生产者已经开始填充2号chunk了（好比你用ie浏览器，你才刷新第一个界面，别人已经刷第二个界面了），
+     * 因此可能另一个生产者的pIndex已经到8193了，即另一个生产者已经开始填充1号chunk了（好比你用ie浏览器，你才刷新第一个界面，别人已经刷第二个界面了），
      * 那么当前生产者读取到的chunk的index可能是0，也可能是1，如果是0，则直接填充；如果是1，则不能填充，需要调整（前后滚动）。
      * <p>
      * 我们来这里是因为当前块索引与预期的ChunkIndex不匹配。为了解决这个问题，我们现在必须将链接的块跟踪到适当的块。不止一个生产者可能会竞争添加或发现新的区块。
@@ -416,10 +418,6 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         final R initialChunk,
         final long requiredChunkIndex)
     {
-
-        // Q: 有没有可能向前跳呢？
-        // A: 可能！不过在appendNextChunks中。
-
         // 当前检查的chunk，需要和producerChunk进行检查（比较索引大小）
         R currentChunk = initialChunk;
         // 后跳步数 - 当生产者速度较快时，不同生产者可能使用不同的chunk，因此可能看见进度最快的那个生产者的chunk，因此需要后跳
@@ -455,9 +453,12 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             }
         }
 
-        // 因为生产者的速度差异，因此可能多跳
+        // 因为生产者的速度差异，因此可能多跳（也可以通过索引比较，所以下面有个断言）
         for (long i = 0; i < jumpBackward; i++)
         {
+            // 如果chunk是新创建的，那么它的prev一定是不为null的（构造时指定并安全发布的）
+            // 如果chunk是缓冲池取出的，它的prev也不为null，因为消费者不能在不使用我们试图获取块的元素的情况下使其为空？ - 尚未阅读多消费者的实现
+
             // prev cannot be null, because the consumer cannot null it without consuming the element for which we are
             // trying to get the chunk.
             currentChunk = currentChunk.lvPrev();
@@ -487,7 +488,9 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             // CAS失败，表示有其它生产者正在尝试创建下一个chunk，因此当前线程需要等待其创建完成
             return null;
         }
-        // 走到这，表示当前线程已获得更新producerChunk的权力，是与其它生产者互斥的。
+        // 走到这，表示当前线程已获得更新producerChunk的权力，是与其它生产者互斥的（加锁）。
+        // 在这期间，其它消费者无法在这期间增加pIndex。
+
         /* LOCKED FOR APPEND */
         {
             // it is valid for the currentChunk to be consumed while appending is in flight, but it's not valid for the
@@ -499,6 +502,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
                 // 这里是双向列表
                 // 对其它生产者而言：新的chunk一旦发布，就可以找到它的前驱节点。
                 // 对于消费者而言：同MpscLinkedQueue，先发布新的chunk，再使其可达（再链接next）。
+                // 此外，没创建一个chunk就发布一个，这样同样填充该chunk的生产者就可以直接填充了，而不必等待整个扩容过程完成。
 
                 R newChunk = newOrPooledChunk(currentChunk, currentChunkIndex + i);
                 soProducerChunk(newChunk);
@@ -507,6 +511,7 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
                 currentChunk = newChunk;
             }
 
+            // 在创建chunk完成之后，更新chunkIndex（解锁），这样其它生产者可以继续创建chunk（如果chunk仍然不足的话）
             // release appending
             soProducerChunkIndex(currentChunkIndex + chunksToAppend);
         }
@@ -514,20 +519,48 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
         return currentChunk;
     }
 
+    /**
+     * 创建一个新的chunk或者从缓存池中取出一个chunk。
+     * <p>
+     * Q: （缓存池）如何保证不会访问到错误的chunk？
+     * A: 1.消费者在归还chunk到池中时，需要确保所有生产者都已经离开该chunk。
+     * 虽然生产者可以跳着发布，但是消费者们是竞争一个个消费的，不会跳着消费，因此消费者消费到chunk的末尾元素时（该chunk每一个元素都已填充），可确保所有生产者已离开该chunk。
+     * 2.
+     *
+     * <p>
+     * 这里和{@link #moveToNextConsumerChunk(MpUnboundedXaddChunk, MpUnboundedXaddChunk)}是实现线程安全的缓存池的关键，也是难点，
+     * 主要在于如何确保不会访问到错误的chunk。
+     *
+     * @param prevChunk      该chunk的上一个chunk
+     * @param nextChunkIndex 下一个chunk的索引（编号）
+     */
     private R newOrPooledChunk(R prevChunk, long nextChunkIndex)
     {
         R newChunk = freeChunksPool.poll();
         if (newChunk != null)
         {
+            // 走到这，表示是从缓存池取出的chunk
+            // 单写者：读者通过 prevChunk.index == nextChunkIndex 条件保护了这里的正确性 - 没找到指的是哪里。。。
+            // 由于是从池中取出的chunk，因此它的index应该小于我们正在使用的chunk
+
+            // Q: 为什么可以使用Plain模式设置prev？
+            // A: 首先，可能仍有消费者在prev上消费，但一定不会有生产者在prev上。prev对
+            // 接下来会安全发布chunk，当前chunk对于生产者而言尚不可达。
+
             // single-writer: prevChunk::index == nextChunkIndex is protecting it
             assert newChunk.lvIndex() < prevChunk.lvIndex();
             newChunk.soPrev(prevChunk);
-            // 这里不可以使用Plain模式写入，因为可能还有消费者正在使用该chunk（多消费者模式下），因此至少需要Ordered模式
+
+            // 这里使用Ordered模式有两个作用：
+            // 1. 实现long的原子存储
+            // 2. 确保prev的可见性，其它生产者通过index确定是否可以访问prev，所以需要index来保护prev （其实接下来的chunk的发布也可以保证它）
+
             // index set is releasing prev, allowing other pending offers to continue
             newChunk.soIndex(nextChunkIndex);
         }
         else
         {
+            // 新创建的chunk - 没有什么需要特别注意的
             newChunk = newChunk(nextChunkIndex, prevChunk, chunkMask + 1, false);
         }
         return newChunk;
@@ -535,10 +568,21 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
 
 
     /**
+     * 在单消费者的情况下，消费者可以确保已消费完才归还chunk到池中，
+     * 在多消费者的情况下，消费者可能提前归还chunk，因此生产者在使用池中的chunk时需要避免覆盖未消费的数据，又演化成了{@link MpmcArrayQueue}。
+     * 注意：在多消费者情况下，虽然消费者可能提前归还chunk，但是该chunk一定完成了本轮的填充，即最快的消费者的进度不可以超过最慢的生产者进度。
+     * 换句话说：
+     * 1. 消费者一旦归还chunk到池中，生产者在从池中取出该chunk前不会引用该chunk。
+     * 2. 消费者一旦开始消费next，生产者在从池中重新取出该chunk之前不会引用该chunk。
+     * <p>
+     * 该方法并没空出'next'的第一个元素，调用方需要自己去实现。
      * Does not null out the first element of `next`, callers must do that
      */
     final void moveToNextConsumerChunk(R cChunk, R next)
     {
+        // 看代码还是少了点全局观，这里没有设置cChunk的prev为null，我以为作者忘记了，还特意问了下。
+        // 是这样的，第一个节点没有prev，而next会设置prev为null，也就是第二个节点开始会清理prev，这就就可以保证cChunk的prev始终为null了。
+
         // avoid GC nepotism
         cChunk.soNext(null);
         next.soPrev(null);
@@ -549,6 +593,8 @@ abstract class MpUnboundedXaddArrayQueue<R extends MpUnboundedXaddChunk<R,E>, E>
             assert pooled;
         }
         this.soConsumerChunk(next);
+
+        // 发布chunk以后，在多消费者模型下，其它消费者可以看见该chunk，也可以开始消费，也就意味着单线程阶段结束。
         // MC case:
         // from now on the code is not single-threaded anymore and
         // other consumers can move forward consumerIndex
