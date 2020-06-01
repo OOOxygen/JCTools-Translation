@@ -71,7 +71,7 @@ public class MpscUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         // 注意这里的时序：生产者先更新索引，再发布元素
         final long pIndex = getAndIncrementProducerIndex();
 
-        // 分别为：pIndex应该落在小填充的chunk上的槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
+        // 分别为：pIndex落在要填充的chunk的哪个槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
         final int piChunkOffset = (int) (pIndex & chunkMask);
         final long piChunkIndex = pIndex >> chunkShift;
 
@@ -413,7 +413,7 @@ public class MpscUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         MpscUnboundedXaddChunk<E> pChunk = null;
         for (int i = 0; i < limit; i++)
         {
-            // 分别为：pIndex应该落在小填充的chunk上的槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
+            // 分别为：pIndex落在要填充的chunk的哪个槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
             final int pChunkOffset = (int) (pIndex & chunkMask);
             final long chunkIndex = pIndex >> chunkShift;
 

@@ -61,7 +61,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
         final long pIndex = getAndIncrementProducerIndex();
 
-        // 分别为：pIndex应该落在小填充的chunk上的槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
+        // 分别为：pIndex落在要填充的chunk的哪个槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
         final int piChunkOffset = (int) (pIndex & chunkMask);
         final long piChunkIndex = pIndex >> chunkShift;
 
@@ -113,7 +113,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             isFirstElementOfNewChunk = false;
 
             // 无论谁先加载都会导致不一致的情况，因此必须校验。
-            // chunk与index同步，并且在cas更新index之后安全的变更，因为我们提前验证了它与index指示的ciChunkIndex匹配。
+            // chunk与index同步，并且在cas更新index之后安全的变更，因为我们提前验证了它与index指示的ciChunkIndex匹配 - index先更新，chunk后更新。
 
             cIndex = this.lvConsumerIndex();
             // chunk is in sync with the index, and is safe to mutate after CAS of index (because we pre-verify it
@@ -135,7 +135,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 isFirstElementOfNewChunk = true;
 
                 // 走到这里，表示当前线程需要在队列不为空的情况下，尝试切换chunk
-                // next已经被其它消费者线程修改，但是：
+                // next可能已经被其它消费者线程修改，但是：
                 // 如果next为null，我们无法确定是其它消费者已清理cChunk到next的链接，还是队列为空，因此必须检查队列是否为空，并尝试cas
                 // 如果next不为null，那么就需要CAS竞争索引，CAS成功的消费者负责切换chunk
 
@@ -148,9 +148,11 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                     if (cIndex >= pIndex && // test against cached pIndex
                         cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
                     {
+                        // 严格的空检查，以满足Queue对poll的语义要求（当且仅当队列为空时才能返回null）
                         // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                         return null;
                     }
+                    // 队列不为空，接下来进行CAS，并且成功的那个消费者赋值切换（更新）chunk
                     // we will go ahead with the CAS and have the winning consumer spin for the next buffer
                 }
 
@@ -178,7 +180,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 if (pooled)
                 {
                     // sequence cIndex索引对应槽位的状态值（是否已填充，已消费）
-                    // sequence == ciChunkIndex 表示该槽位已经被填充（填充之后赋值为chunkIndex），可以被消费（此时竞争更新生产者索引）
+                    // sequence == ciChunkIndex 表示该槽位已经被填充（填充之后赋值为chunkIndex），可以被消费（此时竞争更新消费者索引）
                     // sequence > ciChunkIndex  表示已经被消费，且被下一环的生产者填充了，此时需要重试
                     // sequence < ciChunkIndex  表示队列可能为空，或生产者正在填充，或已填充但sequence尚不可见，此时需要验证队列是否为空
 
@@ -207,6 +209,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 }
                 else
                 {
+                    // 如果不是缓存池中的chunk，如果element不为null，则表示当前槽位可消费，由CAS成功的线程消费。
                     e = cChunk.lvElement(ciChunkOffset);
                     if (e != null)
                     {
@@ -223,6 +226,7 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             if (cIndex >= pIndex && // test against cached pIndex
                 cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
             {
+                // 严格的空检查，以满足Queue对poll的语义要求（当且仅当队列为空时才能返回null）
                 // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                 return null;
             }
@@ -231,16 +235,20 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
         // if we are the isFirstElementOfNewChunk we need to get the consumer chunk
         if (isFirstElementOfNewChunk)
         {
+            // 如果是新chunk的第一个元素，则表示当前线程CAS竞争索引成功，需要负责更新chunk，并返回新chunk的第一个元素
             e = linkNextConsumerChunkAndPoll(cChunk, next, ciChunkIndex);
         }
         else
         {
             if (pooled)
             {
+                // 缓存池中的chunk的元素，为什么不在CAS后加载，而在这里加载呢？可能是为了对应offer吧。
+                // 如果是池中的chunk，上方只检查了sequence，并未加载，因此这里加载
                 e = cChunk.lvElement(ciChunkOffset);
             }
             assert !cChunk.isPooled() ||  (cChunk.isPooled() && cChunk.lvSequence(ciChunkOffset) == ciChunkIndex);
 
+            // 需要清理元素，对于缓存池中的chunk，生产者依赖于element为null，因此使用Ordered模式，以保证尽快的可见性
             cChunk.soElement(ciChunkOffset, null);
         }
         return e;
@@ -323,6 +331,8 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                     continue;
                 }
             }
+            // 理论上这是有bug的，无法保证加载的元素对应cIndex，
+            // 但是很难复现，因为需要在生产者恰好重用该chunk，而消费还未追上生产者，且上次peek的那个线程还未load完成时才会发生...
             e = cChunk.lvElement(ciChunkOffset);
         }
         while (e == null && cIndex != lvProducerIndex());
@@ -351,12 +361,15 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             final long ccChunkIndex = cChunk.lvIndex();
             if (expectedChunkIndex != ccChunkIndex || (next = cChunk.lvNext()) == null)
             {
+                // expectedChunkIndex != ccChunkIndex 表示有其它消费已经更新了chunk - 这里也没有进行更多的努力(因为可能阻塞，需要等待其完成更新)
+                // next == null 表示下一个chunk尚不可达
                 return null;
             }
             E e = null;
             final boolean pooled = next.isPooled();
             if (pooled)
             {
+                // 如果是缓存池中的chunk，只有当对应槽位的sequence为index表示的chunkIndex的时候才可以消费
                 if (next.lvSequence(0) != ciChunkIndex)
                 {
                     return null;
@@ -364,61 +377,69 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
             }
             else
             {
+                // 当不是缓存池中的chunk时，根据element是否为null，即可界定是否可消费
                 e = next.lvElement(0);
                 if (e == null)
                 {
                     return null;
                 }
             }
-            // 走到这里，表示下一个元素已经被填充，此时需要竞争CAS索引，竞争成功的才可以消费对应的元素
+            // 走到这里，表示下一个要消费的元素已经被填充，此时需要竞争CAS索引，竞争成功的才可以消费对应的元素
             if (!casConsumerIndex(cIndex, cIndex + 1))
             {
                 return null;
             }
             if (pooled)
             {
+                // 如果是池中的chunk，上方只检查了sequence，并未加载，因此这里加载
                 e = next.lvElement(0);
             }
             assert e != null;
 
+            // next - 使用Ordered模式，因为生产者依赖于element为null，而不是sequence，因此需要保证尽快的可见性。
+            // 注意：这里和MpmcArrayQueue不同，这里消费者并不需要更新sequence
             next.soElement(0, null);
             moveToNextConsumerChunk(cChunk, next);
             return e;
         }
         else
         {
+            // 走到这，表示要消费的chunk中的中间段（非head）
             final boolean pooled = cChunk.isPooled();
             E e = null;
             if (pooled)
             {
-                // 如果chunk是缓冲池中的对象，那么生产者和消费者通过sequence交互
+                // 如果是缓存池中的chunk，只有当对应槽位的sequence为index表示的chunkIndex的时候才可以消费
+                // 这里其实隐式地校验了cChunk的index
                 final long sequence = cChunk.lvSequence(ciChunkOffset);
                 if (sequence != ciChunkIndex)
                 {
-                    // sequence尚不等
                     return null;
                 }
             }
             else
             {
-                //
+                // 当不是缓存池中的chunk时，根据element是否为null，即可界定是否可消费
                 final long ccChunkIndex = cChunk.lvIndex();
                 if (ccChunkIndex != ciChunkIndex || (e = cChunk.lvElement(ciChunkOffset)) == null)
                 {
-                    // 不是当前消费的chunk，且下一个chunk
+                    // 不是当前索引对应的chunk，或element尚不可见
                     return null;
                 }
             }
+            // 走到这，表示对应的槽位可消费，需要CAS竞争索引，成功的线程负责消费
             if (!casConsumerIndex(cIndex, cIndex + 1))
             {
                 return null;
             }
             if (pooled)
             {
+                // 如果是池中的chunk，上方只检查了sequence，并未加载，因此这里加载
                 e = cChunk.lvElement(ciChunkOffset);
                 assert e != null;
             }
             assert !pooled || (pooled && cChunk.lvSequence(ciChunkOffset) == ciChunkIndex);
+            // next - 使用Ordered模式，因为生产者依赖于element为null，而不是sequence，因此需要保证尽快的可见性。
             cChunk.soElement(ciChunkOffset, null);
             return e;
         }
@@ -465,6 +486,8 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 return null;
             }
         }
+        // 理论上这是有bug的，无法保证加载的元素对应cIndex，
+        // 但是很难复现，因为需要在生产者恰好重用该chunk，而消费还未追上生产者，且上次peek的那个线程还未load完成时才会发生...
         return consumerBuffer.lvElement(ciChunkOffset);
     }
 

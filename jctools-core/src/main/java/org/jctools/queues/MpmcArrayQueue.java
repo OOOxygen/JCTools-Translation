@@ -311,7 +311,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long mask = this.mask;
 
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
-        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新消费者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
         // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充。
 
@@ -333,7 +333,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 if (cIndex >= pIndex && // test against cached pIndex
                     cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
                 {
-                    // 严格地空检查，以满足Queue对poll的语义要求（当且仅当队列为空时才能返回null）
+                    // 严格的空检查，以满足Queue对poll的语义要求（当且仅当队列为空时才能返回null）
                     // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                     return null;
                 }
@@ -380,7 +380,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long mask = this.mask;
 
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
-        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新消费者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
         // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
 
@@ -403,7 +403,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
                 if (cIndex >= pIndex && // test against cached pIndex
                     cIndex == (pIndex = lvProducerIndex())) // update pIndex if we must
                 {
-                    // 严格地空检查，以满足Queue对peek的语义要求（当且仅当队列为空时才能返回null）
+                    // 严格的空检查，以满足Queue对peek的语义要求（当且仅当队列为空时才能返回null）
                     // strict empty check, this ensures [Queue.poll() == null iff isEmpty()]
                     return null;
                 }
@@ -469,7 +469,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long mask = this.mask;
 
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
-        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新消费者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
         // seq < expectedSeq 表示尚未被填充(或已经填充但seq尚不可见)，由于是relaxedPoll，因此可以返回null
 
@@ -508,7 +508,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final long mask = this.mask;
 
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
-        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新消费者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
         // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
 
@@ -621,7 +621,7 @@ public class MpmcArrayQueue<E> extends MpmcArrayQueueL3Pad<E>
         final E[] buffer = this.buffer;
 
         // seq cIndex索引对应槽位的状态值（是否已填充，已消费）
-        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新生产者索引）
+        // seq == expectedSeq(cIndex + 1 ) 表示该槽位已经被填充（填充之后 + 1），可以被消费（此时竞争更新消费者索引）
         // seq > expectedSeq 表示已经被消费（消费之后 + capacity），此时需要重试
         // seq < expectedSeq 表示尚未被填充，因为seq最后对消费者可见，因此需要查看生产者索引，是否有生产者正在填充
 
