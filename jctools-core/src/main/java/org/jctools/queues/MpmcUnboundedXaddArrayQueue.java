@@ -15,6 +15,11 @@ package org.jctools.queues;
 
 
 /**
+ * 以链接的chunk无限增量的Mpsc数组队列。
+ * 与{@link MpmcArrayQueue}不同的是，该类的设计目标是在多个生产者并发offer时提供更好的可伸缩性。
+ * 用户需要知道{@link #poll()}可能在等待新元素可用时自旋（阻塞），为了避免这种行为，应该使用{@link #relaxedPoll()}，
+ * 这也是两者之间的语义差异。
+ * <p>
  * 该类的实现有点像{@link MpmcArrayQueue}和{@link MpscLinkedQueue}的结合体。
  * <p>
  * An MPMC array queue which grows unbounded in linked chunks.<br>
@@ -293,6 +298,11 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
     @Override
     public E peek()
     {
+        // 理论上这是有bug的，无法保证加载的元素对应cIndex。
+        // 但是很难复现，因为需要在生产者恰好重用该chunk，而消费还未追上生产者，且上次peek的那个线程还未load完成时才会发生...
+        // https://github.com/JCTools/JCTools/issues/310
+        // 写针对这个实现的测试用例可是费了我不少脑细胞，现在已经能完美复现，等待解决即可。
+
         final int chunkMask = this.chunkMask;
         final int chunkShift = this.chunkShift;
         long cIndex;
@@ -331,8 +341,6 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                     continue;
                 }
             }
-            // 理论上这是有bug的，无法保证加载的元素对应cIndex，
-            // 但是很难复现，因为需要在生产者恰好重用该chunk，而消费还未追上生产者，且上次peek的那个线程还未load完成时才会发生...
             e = cChunk.lvElement(ciChunkOffset);
         }
         while (e == null && cIndex != lvProducerIndex());
@@ -448,6 +456,8 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
     @Override
     public E relaxedPeek()
     {
+        // 等待作者修复peek的乱序bug之后再注释
+
         final int chunkMask = this.chunkMask;
         final int chunkShift = this.chunkShift;
         final long cIndex = this.lvConsumerIndex();
@@ -486,8 +496,6 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
                 return null;
             }
         }
-        // 理论上这是有bug的，无法保证加载的元素对应cIndex，
-        // 但是很难复现，因为需要在生产者恰好重用该chunk，而消费还未追上生产者，且上次peek的那个线程还未load完成时才会发生...
         return consumerBuffer.lvElement(ciChunkOffset);
     }
 
@@ -503,30 +511,41 @@ public class MpmcUnboundedXaddArrayQueue<E> extends MpUnboundedXaddArrayQueue<Mp
 
         final int chunkShift = this.chunkShift;
         final int chunkMask = this.chunkMask;
+        // 申请了limit个空间，因为不考虑消费者索引，因此会少许多竞争
         long producerSeq = getAndAddProducerIndex(limit);
         MpmcUnboundedXaddChunk<E> producerBuffer = null;
         for (int i = 0; i < limit; i++)
         {
+            // 分别为：pIndex落在要填充的chunk的哪个槽位，pIndex应该填充的chunk的索引（应该填充哪个编号的chunk）
             final int pOffset = (int) (producerSeq & chunkMask);
             long chunkIndex = producerSeq >> chunkShift;
+
             if (producerBuffer == null || producerBuffer.lvIndex() != chunkIndex)
             {
+                // producerBuffer == null 表示首次进入，chunkIndex不等，表示有其它生产者创建了更新的chunk。两种情况都需要获取对应index的chunk
                 producerBuffer = producerChunkForIndex(producerBuffer, chunkIndex);
                 if (producerBuffer.isPooled())
                 {
+                    // 这句好像是多余的.... 因为这里两者一定是想等的
                     chunkIndex = producerBuffer.lvIndex();
                 }
             }
             if (producerBuffer.isPooled())
             {
+                // 怎么感觉写fill的实现的和写offer实现的不是同一个人啊....
+                // 其实就是offer的 - producerBuffer.spinForElement(pOffset, true);
+
+                // 如果是池中的chunk，重用时必须等待消费者完成消费 - 槽位被空出来
                 while (producerBuffer.lvElement(pOffset) != null)
                 {
 
                 }
             }
+            // 发布element，Ordered模式是必须的，保证安全发布
             producerBuffer.soElement(pOffset, s.get());
             if (producerBuffer.isPooled())
             {
+                // 如果是池中的chunk，消费者只有根据sequence才能正确消费
                 producerBuffer.soSequence(pOffset, chunkIndex);
             }
             producerSeq++;

@@ -16,7 +16,7 @@ package org.jctools.queues;
 import org.jctools.util.PortableJvmInfo;
 
 /**
- * 已链接的chunk无限增量的Mpsc数组队列。
+ * 以链接的chunk无限增量的Mpsc数组队列。
  * 与{@link MpscUnboundedArrayQueue}不同的是，该类的设计目标是在多个生产者并发offer时提供更好的可伸缩性。
  * 用户需要知道{@link #poll()}可能在等待新元素可用时自旋（阻塞），为了避免这种行为，应该使用{@link #relaxedPoll()}，
  * 这也是两者之间的语义差异。

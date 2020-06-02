@@ -13,10 +13,10 @@ PS: 译注过程中会尽量保证增量为绿色。
 2. 基于链表的队列： MpscLinkedQueue、SpscLinkedQueue  
 3. 基于**LinkedArray**的队列（手动点赞）： SpscChunkedArrayQueue、SpscGrowableArrayQueue、SpscUnboundedArrayQueue、
 MpscGrowableArrayQueue、MpscChunkedArrayQueue、**MpscUnboundedArrayQueue（赞）**  
-4. XaddQueue（手动点赞）： **MpscUnboundedXaddArrayQueue(赞)**
-5. 其它类型队列：MpscCompoundQueue
+4. XaddQueue（手动点赞）： **MpscUnboundedXaddArrayQueue(赞)**、MpmcUnboundedXaddArrayQueue  
+5. 其它类型队列：MpscCompoundQueue  
 
-PS: 本次翻译（注释）还是比较匆忙的，若有错误或有疑惑可以提出。
+PS: 暂时告一段落，core包中队列除BlockingQueue外都已完成译注。本次译注还是比较匆忙的，若有错误或有疑惑可以提出。
 
 #### 仔细阅读文档，遵守接口和实现类的约束
 如果不是消费者或生产者，则看队列的状态可能是不满足状态约束的（比如生产者进度和消费者进度之间的约束），因此不能充当生产者或消费者时，慎用队列中的方法。
@@ -37,7 +37,8 @@ PS: 我上报之后，他们已经修复了该bug，预计会出现在下一版�
 2. XXmcArrayQueue 基于环形数组的**多消费者**队列，在**peek**时，先读取消费者索引，再加载元素，这是复合操作，这期间队列的状态可能发生改变，
 因此可能peek到一个新填充的数据，而不是下一个要消费的数据，因此建议不要使用peek。  
 它可以表示为另一个约束：**对于任何消费者而言，poll/relaxedPoll/peek/relaxedPeek都不应该表现为乱序（必须满足元素的插入顺序）。**  
-[传送门](https://github.com/JCTools/JCTools/pull/295)
+[*mcArrayQueue 传送门](https://github.com/JCTools/JCTools/pull/295)  
+[MpmcUnboundedXaddArrayQueue 传送门](https://github.com/JCTools/JCTools/issues/310)
 
 #### 读写内存方法约定
 第一个字母表示 Load 或 Store, 第二个字母表示模式(方式)。  
